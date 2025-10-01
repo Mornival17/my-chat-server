@@ -67,10 +67,10 @@ async def broadcast(message):
             del connected_clients[client_id]
 
 async def main():
-    port = int(os.environ.get("PORT", 8765))
-    server = await websockets.serve(handle_client, "0.0.0.0", port)
-    print(f"Chat server running on port {port}")
-    await server.wait_forever()
-
+    port = int(os.environ.get("PORT", 10000))
+    async with websockets.serve(handle_client, "0.0.0.0", port):
+        print(f"Chat server running on port {port}")
+        await asyncio.Future()  # Run forever
+    
 if __name__ == "__main__":
     asyncio.run(main())
