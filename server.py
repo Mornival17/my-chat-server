@@ -1,76 +1,103 @@
 import asyncio
 import websockets
 import json
-import secrets
 import os
+from aiohttp import web
 
-connected_clients = {}
+# Храним подключенных клиентов
+connected_clients = set()
 valid_tokens = {"secret_app_token_12345"}
 
-async def handle_client(websocket, path):
+# HTTP обработчик для health check
+async def handle_http(request):
+    return web.Response(text="WebSocket Chat Server is Running! ✅")
+
+# WebSocket обработчик
+async def websocket_handler(websocket, path):
     try:
+        # Ждем авторизацию
         auth_data = await websocket.recv()
         auth = json.loads(auth_data)
         
         if auth.get('token') not in valid_tokens:
-            await websocket.send(json.dumps({"error": "Invalid token"}))
-            await websocket.close()
+            await websocket.close(1008, "Invalid token")
             return
         
-        client_id = secrets.token_hex(8)
-        connected_clients[client_id] = {
-            'websocket': websocket,
-            'username': auth.get('username', 'Anonymous')
-        }
+        # Регистрируем клиента
+        connected_clients.add(websocket)
+        username = auth.get('username', 'Anonymous')
+        print(f"✅ {username} connected")
         
-        print(f"Client {client_id} connected")
+        # Уведомляем о новом пользователе
+        welcome_msg = json.dumps({
+            "type": "system",
+            "text": f"{username} joined the chat",
+            "users": len(connected_clients)
+        })
+        await broadcast(welcome_msg, websocket)
         
-        online_users = [client['username'] for client in connected_clients.values()]
-        broadcast_message = {
-            'type': 'user_list',
-            'users': online_users
-        }
-        await broadcast(json.dumps(broadcast_message))
-        
+        # Обрабатываем сообщения
         async for message in websocket:
             data = json.loads(message)
-            if data['type'] == 'message':
-                chat_message = {
-                    'type': 'message',
-                    'from': connected_clients[client_id]['username'],
-                    'text': data['text'],
-                    'timestamp': data.get('timestamp')
-                }
-                await broadcast(json.dumps(chat_message))
+            if data.get('type') == 'message':
+                chat_msg = json.dumps({
+                    "type": "message",
+                    "from": username,
+                    "text": data.get('text', ''),
+                    "timestamp": data.get('timestamp')
+                })
+                await broadcast(chat_msg, websocket)
                 
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"❌ WebSocket error: {e}")
     finally:
-        if client_id in connected_clients:
-            del connected_clients[client_id]
-            online_users = [client['username'] for client in connected_clients.values()]
-            broadcast_message = {
-                'type': 'user_list',
-                'users': online_users
-            }
-            await broadcast(json.dumps(broadcast_message))
+        # Удаляем клиента
+        if websocket in connected_clients:
+            connected_clients.remove(websocket)
+            print(f"📤 User disconnected")
 
-async def broadcast(message):
-    disconnected = []
-    for client_id, client in connected_clients.items():
-        try:
-            await client['websocket'].send(message)
-        except:
-            disconnected.append(client_id)
-    for client_id in disconnected:
-        if client_id in connected_clients:
-            del connected_clients[client_id]
+async def broadcast(message, sender=None):
+    # Отправляем сообщение всем клиентам кроме отправителя
+    disconnected = set()
+    for client in connected_clients:
+        if client != sender:  # Не отправляем обратно отправителю
+            try:
+                await client.send(message)
+            except:
+                disconnected.add(client)
+    connected_clients.difference_update(disconnected)
+
+async def start_websocket_server():
+    port = int(os.environ.get('PORT', 10000))
+    print(f"🚀 Starting WebSocket server on port {port}...")
+    return await websockets.serve(websocket_handler, "0.0.0.0", port)
+
+async def start_http_server():
+    app = web.Application()
+    app.router.add_get('/', handle_http)
+    app.router.add_get('/health', handle_http)
+    
+    port = int(os.environ.get('PORT', 10000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"🌐 HTTP server running on port {port}")
+    return runner
 
 async def main():
-    port = int(os.environ.get("PORT", 10000))
-    async with websockets.serve(handle_client, "0.0.0.0", port):
-        print(f"Chat server running on port {port}")
-        await asyncio.Future()  # Run forever
+    print("🔄 Starting servers...")
     
+    # Запускаем оба сервера
+    http_runner = await start_http_server()
+    websocket_server = await start_websocket_server()
+    
+    print("✅ All servers are running!")
+    print("📡 WebSocket URL: wss://your-app.onrender.com")
+    print("🌐 HTTP URL: https://your-app.onrender.com")
+    
+    # Бесконечный цикл
+    await asyncio.Future()
+
 if __name__ == "__main__":
     asyncio.run(main())
