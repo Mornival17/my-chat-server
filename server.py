@@ -4,14 +4,14 @@ import json
 import os
 from aiohttp import web
 
-# HTTP сервер для health check
-async def handle_health_check(request):
-    return web.Response(text="Chat Server OK")
+# === HTTP СЕРВЕР ДЛЯ HEALTH CHECK ===
+async def health_check(request):
+    return web.Response(text="OK")
 
 async def start_http_server():
     app = web.Application()
-    app.router.add_get('/', handle_health_check)
-    app.router.add_get('/health', handle_health_check)
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
     
     runner = web.AppRunner(app)
     await runner.setup()
@@ -19,16 +19,16 @@ async def start_http_server():
     # HTTP сервер на порту 8080
     site = web.TCPSite(runner, '0.0.0.0', 8080)
     await site.start()
-    print("🌐 HTTP server running on port 8080")
+    print("🌐 HTTP Health Check server running on port 8080")
     return runner
 
-# WebSocket сервер
+# === WEBSOCKET СЕРВЕР ===
 connected_clients = set()
 valid_tokens = {"secret_app_token_12345"}
 
 async def websocket_handler(websocket, path):
     try:
-        # Ждем авторизацию
+        # Авторизация
         auth_data = await websocket.recv()
         auth = json.loads(auth_data)
         
@@ -40,18 +40,17 @@ async def websocket_handler(websocket, path):
         username = auth.get('username', 'Anonymous')
         print(f"✅ {username} connected")
         
-        # Отправляем приветствие
+        # Приветствие
         await websocket.send(json.dumps({
-            "type": "system",
+            "type": "system", 
             "text": f"Welcome {username}!",
             "users": len(connected_clients)
         }))
         
-        # Обрабатываем сообщения
+        # Обработка сообщений
         async for message in websocket:
             data = json.loads(message)
             if data.get('type') == 'message':
-                # Отправляем всем клиентам
                 broadcast_msg = json.dumps({
                     "type": "message",
                     "from": username,
@@ -59,12 +58,14 @@ async def websocket_handler(websocket, path):
                     "timestamp": data.get('timestamp')
                 })
                 
+                # Рассылка всем
                 disconnected = set()
                 for client in connected_clients:
-                    try:
-                        await client.send(broadcast_msg)
-                    except:
-                        disconnected.add(client)
+                    if client != websocket:  # Не отправляем отправителю
+                        try:
+                            await client.send(broadcast_msg)
+                        except:
+                            disconnected.add(client)
                 connected_clients.difference_update(disconnected)
                 
     except Exception as e:
@@ -80,6 +81,7 @@ async def start_websocket_server():
     print(f"🚀 WebSocket server running on port {port}")
     return server
 
+# === ГЛАВНАЯ ФУНКЦИЯ ===
 async def main():
     print("🔄 Starting servers...")
     
@@ -88,7 +90,7 @@ async def main():
     websocket_server = await start_websocket_server()
     
     print("✅ All servers are running!")
-    print("📡 WebSocket URL: wss://mornival.onrender.com")
+    print("📡 WebSocket: wss://mornival.onrender.com")
     print("🌐 Health check: https://mornival.onrender.com")
     
     # Бесконечный цикл
