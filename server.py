@@ -5,11 +5,11 @@ import secrets
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # Разрешаем все CORS запросы
 
 # Глобальные переменные для хранения данных
-rooms = {}  # {room_id: {name: str, password: str, created_at: str, users: set, messages: [], next_id: int}}
-user_rooms = {}  # {username: room_id}
+rooms = {}
+user_rooms = {}
 
 def generate_room_id():
     return secrets.token_urlsafe(8)
@@ -22,8 +22,11 @@ def home():
 def health():
     return "OK"
 
-@app.route('/create_room', methods=['POST'])
+@app.route('/create_room', methods=['POST', 'OPTIONS'])
 def create_room():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
     try:
         data = request.get_json()
         room_name = data.get('room_name', 'New Room')
@@ -46,7 +49,7 @@ def create_room():
         # Связываем пользователя с комнатой
         user_rooms[username] = room_id
         
-        print(f"🎉 Room created: {room_name} (ID: {room_id})")
+        print(f"🎉 Room created: {room_name} (ID: {room_id}) by {username}")
         return jsonify({
             "status": "created", 
             "room_id": room_id,
@@ -57,14 +60,20 @@ def create_room():
         print(f"❌ Error in /create_room: {e}")
         return jsonify({"error": "Server error"}), 500
 
-@app.route('/join_room', methods=['POST'])
+@app.route('/join_room', methods=['POST', 'OPTIONS'])
 def join_room():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
     try:
         data = request.get_json()
         room_id = data.get('room_id')
         password = data.get('password', '')
         username = data.get('username', 'Anonymous')
         
+        if not room_id:
+            return jsonify({"error": "Room ID is required"}), 400
+            
         if room_id not in rooms:
             return jsonify({"error": "Room not found"}), 404
         
@@ -99,17 +108,27 @@ def join_room():
         print(f"❌ Error in /join_room: {e}")
         return jsonify({"error": "Server error"}), 500
 
-@app.route('/send', methods=['POST'])
+@app.route('/send', methods=['POST', 'OPTIONS'])
 def send_message():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
     try:
         data = request.get_json()
         username = data.get('username')
         text = data.get('text', '').strip()
         
-        if not username or username not in user_rooms:
+        if not username:
+            return jsonify({"error": "Username is required"}), 400
+            
+        if username not in user_rooms:
             return jsonify({"error": "User not in any room"}), 400
         
         room_id = user_rooms[username]
+        
+        if room_id not in rooms:
+            return jsonify({"error": "Room not found"}), 404
+            
         room = rooms[room_id]
         
         if not text:
@@ -144,10 +163,17 @@ def receive_messages():
         username = request.args.get('username')
         since_id = int(request.args.get('since_id', 0))
         
-        if not username or username not in user_rooms:
+        if not username:
+            return jsonify({"error": "Username is required"}), 400
+            
+        if username not in user_rooms:
             return jsonify({"error": "User not in any room"}), 400
         
         room_id = user_rooms[username]
+        
+        if room_id not in rooms:
+            return jsonify({"error": "Room not found"}), 404
+            
         room = rooms[room_id]
         
         # Фильтруем сообщения
@@ -156,7 +182,7 @@ def receive_messages():
             if msg['id'] > since_id
         ]
         
-        print(f"📤 Sending {len(new_messages)} new messages from room {room_id}")
+        print(f"📤 Sending {len(new_messages)} new messages from room {room_id} to {username}")
         return jsonify({
             "messages": new_messages,
             "users": list(room['users']),
