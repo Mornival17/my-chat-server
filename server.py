@@ -5,17 +5,30 @@ import secrets
 import uuid
 from flask_cors import CORS
 
+# Создаем Flask приложение
 app = Flask(__name__)
-CORS(app)  # Разрешаем все CORS запросы
+# Разрешаем все CORS запросы (чтобы фронтенд мог общаться с сервером)
+CORS(app)
 
 # Глобальные переменные для хранения данных
-rooms = {}  # {room_id: {name: str, password: str, created_at: str, users: set, messages: [], next_id: int, media: {}}}
-user_rooms = {}  # {username: room_id}
+
+# rooms хранит информацию о всех комнатах
+# Формат: {room_id: {name: str, password: str, created_at: str, users: set, messages: [], next_id: int, media: {}}}
+rooms = {}
+
+# user_rooms хранит связь пользователь -> комната
+# Формат: {username: room_id}
+user_rooms = {}
+
+# call_signals хранит сигналы звонков для пользователей
+# Формат: {username: [list_of_signals]}
+call_signals = {}
 
 def generate_room_id():
     """Генерация уникального ID комнаты"""
     return secrets.token_urlsafe(8)
 
+# Базовые endpoint'ы
 @app.route('/')
 def home():
     return "🚀 Chat Server Ready! Use /create_room, /join_room, /send and /receive"
@@ -24,12 +37,14 @@ def home():
 def health():
     return "OK"
 
+# Создание комнаты
 @app.route('/create_room', methods=['POST', 'OPTIONS'])
 def create_room():
     if request.method == 'OPTIONS':
         return '', 200
         
     try:
+        # Получаем данные из запроса
         data = request.get_json()
         room_name = data.get('room_name', 'New Room')
         password = data.get('password', '')
@@ -38,21 +53,23 @@ def create_room():
         # Генерируем уникальный ID комнаты
         room_id = generate_room_id()
         
-        # Создаем комнату
+        # Создаем комнату со всей необходимой информацией
         rooms[room_id] = {
-            'name': room_name,
-            'password': password,
-            'created_at': datetime.now().isoformat(),
-            'users': set([username]),
-            'messages': [],
-            'next_id': 1,
-            'media': {}  # Для хранения медиафайлов
+            'name': room_name,                    # Название комнаты
+            'password': password,                 # Пароль (может быть пустым)
+            'created_at': datetime.now().isoformat(),  # Время создания
+            'users': set([username]),             # Множество пользователей
+            'messages': [],                       # Список сообщений
+            'next_id': 1,                         # Следующий ID сообщения
+            'media': {}                           # Хранилище медиафайлов
         }
         
         # Связываем пользователя с комнатой
         user_rooms[username] = room_id
         
         print(f"🎉 Room created: {room_name} (ID: {room_id}) by {username}")
+        
+        # Возвращаем успешный ответ
         return jsonify({
             "status": "created", 
             "room_id": room_id,
@@ -63,6 +80,7 @@ def create_room():
         print(f"❌ Error in /create_room: {e}")
         return jsonify({"error": "Server error"}), 500
 
+# Присоединение к комнате
 @app.route('/join_room', methods=['POST', 'OPTIONS'])
 def join_room():
     if request.method == 'OPTIONS':
@@ -74,15 +92,17 @@ def join_room():
         password = data.get('password', '')
         username = data.get('username', 'Anonymous')
         
+        # Проверяем что room_id предоставлен
         if not room_id:
             return jsonify({"error": "Room ID is required"}), 400
             
+        # Проверяем что комната существует
         if room_id not in rooms:
             return jsonify({"error": "Room not found"}), 404
         
         room = rooms[room_id]
         
-        # Проверка пароля
+        # Проверяем пароль если он установлен
         if room['password'] and room['password'] != password:
             return jsonify({"error": "Invalid password"}), 401
         
@@ -90,7 +110,7 @@ def join_room():
         room['users'].add(username)
         user_rooms[username] = room_id
         
-        # Добавляем системное сообщение
+        # Добавляем системное сообщение о присоединении
         system_message = {
             'id': room['next_id'],
             'user': 'System',
@@ -102,6 +122,7 @@ def join_room():
         room['next_id'] += 1
         
         print(f"👤 User {username} joined room {room_id}")
+        
         return jsonify({
             "status": "joined",
             "room_name": room['name'],
@@ -112,6 +133,7 @@ def join_room():
         print(f"❌ Error in /join_room: {e}")
         return jsonify({"error": "Server error"}), 500
 
+# Отправка сообщений
 @app.route('/send', methods=['POST', 'OPTIONS'])
 def send_message():
     if request.method == 'OPTIONS':
@@ -125,14 +147,17 @@ def send_message():
         audio_data = data.get('audio')  # Base64 encoded audio
         message_type = data.get('type', 'text')  # text, image, audio
         
+        # Проверяем что username предоставлен
         if not username:
             return jsonify({"error": "Username is required"}), 400
             
+        # Проверяем что пользователь находится в какой-либо комнате
         if username not in user_rooms:
             return jsonify({"error": "User not in any room"}), 400
         
         room_id = user_rooms[username]
         
+        # Проверяем что комната существует
         if room_id not in rooms:
             return jsonify({"error": "Room not found"}), 404
             
@@ -142,7 +167,7 @@ def send_message():
         if not text and not image_data and not audio_data:
             return jsonify({"error": "Empty message"}), 400
         
-        # Автоматически определяем тип сообщения
+        # Автоматически определяем тип сообщения по наличию медиа
         if image_data:
             message_type = 'image'
             if not text:
@@ -152,7 +177,7 @@ def send_message():
             if not text:
                 text = '🎤 Voice message'
         
-        # Создаем сообщение с типом
+        # Создаем объект сообщения
         message = {
             'id': room['next_id'],
             'user': username,
@@ -161,12 +186,12 @@ def send_message():
             'time': datetime.now().isoformat()
         }
         
-        # Сохраняем медиаданные если есть
+        # Сохраняем медиаданные если они есть
         if image_data:
             # Генерируем уникальный ID для изображения
             image_id = str(uuid.uuid4())
             message['image_id'] = image_id
-            # Сохраняем в памяти (для продакшена лучше использовать облачное хранилище)
+            # Сохраняем Base64 данные изображения
             room['media'][image_id] = image_data
             print(f"📸 Image saved with ID: {image_id}")
         
@@ -177,11 +202,11 @@ def send_message():
             room['media'][audio_id] = audio_data
             print(f"🎵 Audio saved with ID: {audio_id}")
         
-        # Сохраняем сообщение
+        # Сохраняем сообщение в комнату
         room['messages'].append(message)
         room['next_id'] += 1
         
-        # Лимит сообщений (последние 100)
+        # Ограничиваем количество сообщений (последние 100)
         if len(room['messages']) > 100:
             # Удаляем также медиафайлы старых сообщений
             removed_messages = room['messages'][:-100]
@@ -194,12 +219,13 @@ def send_message():
         
         print(f"📨 Message in room {room_id}: {username}: {text[:50]}... (type: {message_type})")
         
+        # Формируем ответ
         response_data = {
             "status": "sent", 
             "message_id": message['id']
         }
         
-        # Добавляем ID медиафайлов в ответ
+        # Добавляем ID медиафайлов в ответ если они есть
         if 'image_id' in message:
             response_data['image_id'] = message['image_id']
         if 'audio_id' in message:
@@ -211,6 +237,7 @@ def send_message():
         print(f"❌ Error in /send: {e}")
         return jsonify({"error": "Server error"}), 500
 
+# Получение сообщений
 @app.route('/receive', methods=['GET'])
 def receive_messages():
     try:
@@ -230,7 +257,7 @@ def receive_messages():
             
         room = rooms[room_id]
         
-        # Фильтруем сообщения
+        # Фильтруем сообщения начиная с since_id
         new_messages = [
             msg for msg in room['messages'] 
             if msg['id'] > since_id
@@ -255,9 +282,10 @@ def receive_messages():
         print(f"❌ Error in /receive: {e}")
         return jsonify({"error": "Server error"}), 500
 
+# Получение медиафайлов (альтернативный способ)
 @app.route('/media/<room_id>/<media_id>')
 def get_media(room_id, media_id):
-    """Эндпоинт для получения медиафайлов (альтернативный способ)"""
+    """Эндпоинт для получения медиафайлов по отдельности"""
     try:
         if room_id not in rooms:
             return jsonify({"error": "Room not found"}), 404
@@ -269,7 +297,7 @@ def get_media(room_id, media_id):
             
         media_data = room['media'][media_id]
         
-        # Определяем тип контента
+        # Определяем тип контента по префиксу data URL
         if media_data.startswith('data:image'):
             return jsonify({"data": media_data})
         elif media_data.startswith('data:audio'):
@@ -281,6 +309,7 @@ def get_media(room_id, media_id):
         print(f"❌ Error in /media: {e}")
         return jsonify({"error": "Server error"}), 500
 
+# Информация о комнате
 @app.route('/room_info', methods=['GET'])
 def room_info():
     try:
@@ -304,24 +333,141 @@ def room_info():
         print(f"❌ Error in /room_info: {e}")
         return jsonify({"error": "Server error"}), 500
 
+# Система звонков - обработка сигналов
+@app.route('/call_signal', methods=['POST', 'OPTIONS'])
+def handle_call_signal():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
+    try:
+        data = request.get_json()
+        signal_type = data.get('type')
+        target_user = data.get('target_user')
+        room_id = data.get('room_id')
+        caller = data.get('caller')
+        
+        print(f"📞 Call signal: {signal_type} from {caller} to {target_user} in room {room_id}")
+        
+        # Проверяем что целевой пользователь существует и находится в той же комнате
+        if (target_user not in user_rooms or 
+            user_rooms[target_user] != room_id or
+            target_user == caller):
+            return jsonify({"error": "Target user not available"}), 404
+        
+        # Создаем очередь сигналов для пользователя если её нет
+        if target_user not in call_signals:
+            call_signals[target_user] = []
+        
+        # Создаем объект сигнала
+        signal_data = {
+            'type': signal_type,
+            'caller': caller,
+            'room_id': room_id,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Добавляем специфичные данные в зависимости от типа сигнала
+        if signal_type == 'call-offer':
+            signal_data['offer'] = data.get('offer')
+        elif signal_type == 'call-answer':
+            signal_data['answer'] = data.get('answer')
+        elif signal_type == 'ice-candidate':
+            signal_data['candidate'] = data.get('candidate')
+        
+        # Добавляем сигнал в очередь целевого пользователя
+        call_signals[target_user].append(signal_data)
+        
+        # Ограничиваем размер очереди сигналов
+        if len(call_signals[target_user]) > 10:
+            call_signals[target_user] = call_signals[target_user][-10:]
+        
+        print(f"✅ Call signal stored for {target_user}. Queue size: {len(call_signals[target_user])}")
+        
+        return jsonify({
+            "status": "signal_delivered",
+            "target_user": target_user
+        })
+        
+    except Exception as e:
+        print(f"❌ Error in /call_signal: {e}")
+        return jsonify({"error": "Server error"}), 500
+
+# Получение сигналов звонков
+@app.route('/get_call_signals', methods=['GET'])
+def get_call_signals():
+    try:
+        username = request.args.get('username')
+        
+        if not username:
+            return jsonify({"error": "Username is required"}), 400
+        
+        # Получаем все сигналы для пользователя
+        user_signals = call_signals.get(username, [])
+        
+        # Очищаем очередь после чтения (сигналы доставляются один раз)
+        if username in call_signals:
+            call_signals[username] = []
+        
+        print(f"📡 Sending {len(user_signals)} call signals to {username}")
+        
+        return jsonify({
+            "signals": user_signals
+        })
+        
+    except Exception as e:
+        print(f"❌ Error in /get_call_signals: {e}")
+        return jsonify({"error": "Server error"}), 500
+
+# Завершение звонка
+@app.route('/end_call', methods=['POST'])
+def handle_end_call():
+    try:
+        data = request.get_json()
+        target_user = data.get('target_user')
+        caller = data.get('caller')
+        room_id = data.get('room_id')
+        
+        print(f"📞 Call ended: {caller} to {target_user}")
+        
+        # Отправляем сигнал завершения целевому пользователю
+        if target_user and target_user in call_signals:
+            end_signal = {
+                'type': 'call-end',
+                'caller': caller,
+                'room_id': room_id,
+                'timestamp': datetime.now().isoformat()
+            }
+            call_signals[target_user].append(end_signal)
+        
+        return jsonify({"status": "call_ended"})
+        
+    except Exception as e:
+        print(f"❌ Error in /end_call: {e}")
+        return jsonify({"error": "Server error"}), 500
+
+# Очистка старых комнат (для обслуживания)
 @app.route('/cleanup', methods=['POST'])
 def cleanup_rooms():
-    """Очистка старых комнат (для обслуживания)"""
+    """Очистка комнат старше 24 часов"""
     try:
         current_time = datetime.now()
         rooms_to_delete = []
         
+        # Находим комнаты старше 24 часов
         for room_id, room in rooms.items():
             created_at = datetime.fromisoformat(room['created_at'])
-            # Удаляем комнаты старше 24 часов
             if (current_time - created_at).total_seconds() > 24 * 60 * 60:
                 rooms_to_delete.append(room_id)
         
+        # Удаляем старые комнаты
         for room_id in rooms_to_delete:
             # Удаляем пользователей этой комнаты
             users_to_remove = [user for user, rid in user_rooms.items() if rid == room_id]
             for user in users_to_remove:
                 del user_rooms[user]
+                # Также удаляем сигналы звонков для этих пользователей
+                if user in call_signals:
+                    del call_signals[user]
             del rooms[room_id]
             print(f"🧹 Deleted old room: {room_id}")
         
@@ -335,15 +481,16 @@ def cleanup_rooms():
         print(f"❌ Error in /cleanup: {e}")
         return jsonify({"error": "Server error"}), 500
 
+# Статистика сервера
 @app.route('/stats')
 def get_stats():
-    """Статистика сервера"""
+    """Получение статистики сервера"""
     try:
         total_rooms = len(rooms)
         total_users = len(user_rooms)
         total_messages = sum(len(room['messages']) for room in rooms.values())
         
-        # Комнаты с пользователями
+        # Активные комнаты (с пользователями)
         active_rooms = {room_id: room for room_id, room in rooms.items() if len(room['users']) > 0}
         
         return jsonify({
@@ -351,6 +498,7 @@ def get_stats():
             "active_rooms": len(active_rooms),
             "total_users": total_users,
             "total_messages": total_messages,
+            "pending_call_signals": sum(len(signals) for signals in call_signals.values()),
             "server_time": datetime.now().isoformat()
         })
         
@@ -358,6 +506,7 @@ def get_stats():
         print(f"❌ Error in /stats: {e}")
         return jsonify({"error": "Server error"}), 500
 
+# Запуск сервера
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     print(f"🚀 Starting Flask server with CORS on port {port}")
@@ -367,6 +516,9 @@ if __name__ == '__main__':
     print(f"   POST /send - Send message")
     print(f"   GET  /receive - Receive messages")
     print(f"   GET  /room_info - Get room info")
+    print(f"   POST /call_signal - Send call signal")
+    print(f"   GET  /get_call_signals - Get pending call signals")
+    print(f"   POST /end_call - End call")
     print(f"   GET  /stats - Server statistics")
     print(f"   POST /cleanup - Cleanup old rooms")
     app.run(host='0.0.0.0', port=port, debug=False)
