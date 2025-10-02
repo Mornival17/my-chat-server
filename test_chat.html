@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Chat Test</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: Arial, sans-serif; 
+            padding: 20px;
+            background: #f0f2f5;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .chat-box {
+            height: 400px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 15px;
+            overflow-y: auto;
+            background: #fafafa;
+        }
+        .message {
+            margin-bottom: 10px;
+            padding: 8px 12px;
+            border-radius: 15px;
+            max-width: 80%;
+        }
+        .message.own {
+            background: #007bff;
+            color: white;
+            margin-left: auto;
+            text-align: right;
+        }
+        .message.other {
+            background: #e9ecef;
+            color: #333;
+        }
+        .input-area {
+            display: flex;
+            gap: 10px;
+        }
+        input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        button {
+            padding: 10px 20px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        .info {
+            background: #d4edda;
+            color: #155724;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="info">
+            <strong>Тестовый чат-клиент</strong><br>
+            Сервер: https://mornival.onrender.com<br>
+            Токен: secret_app_token_12345
+        </div>
+        
+        <div class="chat-box" id="chatBox">
+            <div class="message" style="background: #fff3cd; color: #856404; max-width: 100%;">
+                Чат запущен. Сообщения обновляются каждые 2 секунды.
+            </div>
+        </div>
+        
+        <div class="input-area">
+            <input type="text" id="username" placeholder="Ваше имя" value="User1">
+            <input type="text" id="messageInput" placeholder="Введите сообщение...">
+            <button onclick="sendMessage()">Отправить</button>
+        </div>
+        
+        <div style="margin-top: 15px; font-size: 12px; color: #666;">
+            ID последнего сообщения: <span id="lastId">0</span>
+        </div>
+    </div>
+
+    <script>
+        const SERVER_URL = 'https://mornival.onrender.com';
+        const TOKEN = 'secret_app_token_12345';
+        
+        let lastMessageId = 0;
+        let currentUsername = 'User1';
+
+        // Функция отправки сообщения
+        async function sendMessage() {
+            const username = document.getElementById('username').value;
+            const messageInput = document.getElementById('messageInput');
+            const text = messageInput.value.trim();
+            
+            if (!text) return;
+            
+            currentUsername = username;
+            
+            // Показываем сообщение сразу
+            addMessage(username, text, true);
+            messageInput.value = '';
+            
+            try {
+                const response = await fetch(SERVER_URL + '/send', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        token: TOKEN,
+                        username: username,
+                        text: text
+                    })
+                });
+                
+                const result = await response.json();
+                console.log('Send result:', result);
+                
+            } catch (error) {
+                console.error('Send error:', error);
+                addMessage('System', 'Ошибка отправки', false, true);
+            }
+        }
+
+        // Функция получения сообщений
+        async function getMessages() {
+            try {
+                const response = await fetch(`${SERVER_URL}/receive?token=${TOKEN}&since_id=${lastMessageId}`);
+                const data = await response.json();
+                
+                if (data.messages && data.messages.length > 0) {
+                    data.messages.forEach(msg => {
+                        if (msg.user !== currentUsername) {
+                            addMessage(msg.user, msg.text, false);
+                        }
+                        lastMessageId = Math.max(lastMessageId, msg.id);
+                    });
+                    document.getElementById('lastId').textContent = lastMessageId;
+                }
+                
+            } catch (error) {
+                console.error('Receive error:', error);
+            }
+        }
+
+        // Функция добавления сообщения в чат
+        function addMessage(user, text, isOwn = false, isSystem = false) {
+            const chatBox = document.getElementById('chatBox');
+            const messageDiv = document.createElement('div');
+            
+            if (isSystem) {
+                messageDiv.className = 'message';
+                messageDiv.style.background = '#f8d7da';
+                messageDiv.style.color = '#721c24';
+                messageDiv.style.maxWidth = '100%';
+            } else {
+                messageDiv.className = `message ${isOwn ? 'own' : 'other'}`;
+            }
+            
+            const time = new Date().toLocaleTimeString();
+            messageDiv.innerHTML = `
+                <strong>${user}:</strong> ${text}
+                <div style="font-size: 11px; opacity: 0.7; margin-top: 5px;">${time}</div>
+            `;
+            
+            chatBox.appendChild(messageDiv);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        // Отправка по Enter
+        document.getElementById('messageInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') sendMessage();
+        });
+
+        // Автообновление сообщений каждые 2 секунды
+        setInterval(getMessages, 2000);
+
+        // Первая загрузка сообщений
+        getMessages();
+
+        console.log('Chat client started');
+    </script>
+</body>
+</html>
