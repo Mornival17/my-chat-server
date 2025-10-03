@@ -13,7 +13,7 @@ CORS(app)
 # Глобальные переменные для хранения данных
 
 # rooms хранит информацию о всех комнатах
-# Формат: {room_id: {name: str, password: str, created_at: str, users: set, messages: [], next_id: int, media: {}}}
+# Формат: {room_id: {name: str, password: str, created_at: str, users: set, messages: [], next_id: int, media: {}, reactions: {}}}
 rooms = {}
 
 # user_rooms хранит связь пользователь -> комната
@@ -61,7 +61,8 @@ def create_room():
             'users': set([username]),             # Множество пользователей
             'messages': [],                       # Список сообщений
             'next_id': 1,                         # Следующий ID сообщения
-            'media': {}                           # Хранилище медиафайлов
+            'media': {},                          # Хранилище медиафайлов
+            'reactions': {}                       # Хранилище реакций: {message_id: {emoji: [usernames]}}
         }
         
         # Связываем пользователя с комнатой
@@ -146,6 +147,8 @@ def send_message():
         image_data = data.get('image')  # Base64 encoded image
         audio_data = data.get('audio')  # Base64 encoded audio
         message_type = data.get('type', 'text')  # text, image, audio
+        reply_to = data.get('reply_to')  # ID сообщения, на которое отвечаем
+        self_destruct = data.get('self_destruct', False)  # Самоуничтожающееся сообщение
         
         # Проверяем что username предоставлен
         if not username:
@@ -183,7 +186,9 @@ def send_message():
             'user': username,
             'text': text,
             'type': message_type,
-            'time': datetime.now().isoformat()
+            'time': datetime.now().isoformat(),
+            'reply_to': reply_to,  # Добавляем информацию о reply
+            'self_destruct': self_destruct  # Добавляем флаг самоуничтожения
         }
         
         # Сохраняем медиаданные если они есть
@@ -208,16 +213,20 @@ def send_message():
         
         # Ограничиваем количество сообщений (последние 100)
         if len(room['messages']) > 100:
-            # Удаляем также медиафайлы старых сообщений
+            # Удаляем также медиафайлы и реакции старых сообщений
             removed_messages = room['messages'][:-100]
             for msg in removed_messages:
+                # Удаляем медиа
                 if 'image_id' in msg and msg['image_id'] in room['media']:
                     del room['media'][msg['image_id']]
                 if 'audio_id' in msg and msg['audio_id'] in room['media']:
                     del room['media'][msg['audio_id']]
+                # Удаляем реакции
+                if msg['id'] in room['reactions']:
+                    del room['reactions'][msg['id']]
             room['messages'] = room['messages'][-100:]
         
-        print(f"📨 Message in room {room_id}: {username}: {text[:50]}... (type: {message_type})")
+        print(f"📨 Message in room {room_id}: {username}: {text[:50]}... (type: {message_type}, reply_to: {reply_to})")
         
         # Формируем ответ
         response_data = {
@@ -269,17 +278,170 @@ def receive_messages():
                 msg['image_data'] = room['media'][msg['image_id']]
             if 'audio_id' in msg and msg['audio_id'] in room['media']:
                 msg['audio_data'] = room['media'][msg['audio_id']]
+            
+            # Добавляем реакции к сообщениям
+            if msg['id'] in room['reactions']:
+                msg['reactions'] = room['reactions'][msg['id']]
         
         print(f"📤 Sending {len(new_messages)} new messages from room {room_id} to {username}")
         
         return jsonify({
             "messages": new_messages,
             "users": list(room['users']),
-            "room_name": room['name']
+            "room_name": room['name'],
+            "reactions": room['reactions']  # Отправляем все реакции комнаты
         })
         
     except Exception as e:
         print(f"❌ Error in /receive: {e}")
+        return jsonify({"error": "Server error"}), 500
+
+# Добавление реакции к сообщению
+@app.route('/add_reaction', methods=['POST', 'OPTIONS'])
+def add_reaction():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
+    try:
+        data = request.get_json()
+        message_id = data.get('message_id')
+        username = data.get('username')
+        emoji = data.get('emoji')
+        room_id = data.get('room_id')
+        
+        # Проверяем обязательные поля
+        if not all([message_id, username, emoji, room_id]):
+            return jsonify({"error": "Missing required fields"}), 400
+            
+        # Проверяем что комната существует
+        if room_id not in rooms:
+            return jsonify({"error": "Room not found"}), 404
+            
+        room = rooms[room_id]
+        
+        # Проверяем что сообщение существует
+        message_exists = any(msg['id'] == message_id for msg in room['messages'])
+        if not message_exists:
+            return jsonify({"error": "Message not found"}), 404
+            
+        # Проверяем что пользователь находится в этой комнате
+        if username not in room['users']:
+            return jsonify({"error": "User not in room"}), 403
+        
+        # Инициализируем хранилище реакций для сообщения если его нет
+        if message_id not in room['reactions']:
+            room['reactions'][message_id] = {}
+        
+        # Инициализируем список пользователей для эмодзи если его нет
+        if emoji not in room['reactions'][message_id]:
+            room['reactions'][message_id][emoji] = []
+        
+        # Добавляем пользователя в реакцию если его там еще нет
+        if username not in room['reactions'][message_id][emoji]:
+            room['reactions'][message_id][emoji].append(username)
+            print(f"✅ Reaction added: {username} reacted with {emoji} to message {message_id}")
+        else:
+            print(f"ℹ️ User {username} already reacted with {emoji} to message {message_id}")
+        
+        return jsonify({
+            "status": "reaction_added",
+            "message_id": message_id,
+            "emoji": emoji,
+            "username": username,
+            "reactions": room['reactions'][message_id]
+        })
+        
+    except Exception as e:
+        print(f"❌ Error in /add_reaction: {e}")
+        return jsonify({"error": "Server error"}), 500
+
+# Удаление реакции с сообщения
+@app.route('/remove_reaction', methods=['POST', 'OPTIONS'])
+def remove_reaction():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
+    try:
+        data = request.get_json()
+        message_id = data.get('message_id')
+        username = data.get('username')
+        emoji = data.get('emoji')
+        room_id = data.get('room_id')
+        
+        # Проверяем обязательные поля
+        if not all([message_id, username, emoji, room_id]):
+            return jsonify({"error": "Missing required fields"}), 400
+            
+        # Проверяем что комната существует
+        if room_id not in rooms:
+            return jsonify({"error": "Room not found"}), 404
+            
+        room = rooms[room_id]
+        
+        # Проверяем что сообщение существует
+        message_exists = any(msg['id'] == message_id for msg in room['messages'])
+        if not message_exists:
+            return jsonify({"error": "Message not found"}), 404
+            
+        # Проверяем что пользователь находится в этой комнате
+        if username not in room['users']:
+            return jsonify({"error": "User not in room"}), 403
+        
+        # Проверяем что реакция существует
+        if (message_id not in room['reactions'] or 
+            emoji not in room['reactions'][message_id] or
+            username not in room['reactions'][message_id][emoji]):
+            return jsonify({"error": "Reaction not found"}), 404
+        
+        # Удаляем пользователя из реакции
+        room['reactions'][message_id][emoji].remove(username)
+        
+        # Если после удаления список пользователей пуст, удаляем эмодзи
+        if not room['reactions'][message_id][emoji]:
+            del room['reactions'][message_id][emoji]
+        
+        # Если после удаления сообщение не имеет реакций, удаляем запись
+        if not room['reactions'][message_id]:
+            del room['reactions'][message_id]
+        
+        print(f"🗑️ Reaction removed: {username} removed {emoji} from message {message_id}")
+        
+        return jsonify({
+            "status": "reaction_removed",
+            "message_id": message_id,
+            "emoji": emoji,
+            "username": username
+        })
+        
+    except Exception as e:
+        print(f"❌ Error in /remove_reaction: {e}")
+        return jsonify({"error": "Server error"}), 500
+
+# Получение реакций для сообщения
+@app.route('/get_reactions', methods=['GET'])
+def get_reactions():
+    try:
+        room_id = request.args.get('room_id')
+        message_id = int(request.args.get('message_id'))
+        
+        if not room_id or not message_id:
+            return jsonify({"error": "Room ID and Message ID are required"}), 400
+            
+        if room_id not in rooms:
+            return jsonify({"error": "Room not found"}), 404
+            
+        room = rooms[room_id]
+        
+        # Возвращаем реакции для сообщения или пустой объект
+        reactions = room['reactions'].get(message_id, {})
+        
+        return jsonify({
+            "message_id": message_id,
+            "reactions": reactions
+        })
+        
+    except Exception as e:
+        print(f"❌ Error in /get_reactions: {e}")
         return jsonify({"error": "Server error"}), 500
 
 # Получение медиафайлов (альтернативный способ)
@@ -489,6 +651,7 @@ def get_stats():
         total_rooms = len(rooms)
         total_users = len(user_rooms)
         total_messages = sum(len(room['messages']) for room in rooms.values())
+        total_reactions = sum(len(reactions) for room in rooms.values() for reactions in room['reactions'].values())
         
         # Активные комнаты (с пользователями)
         active_rooms = {room_id: room for room_id, room in rooms.items() if len(room['users']) > 0}
@@ -498,6 +661,7 @@ def get_stats():
             "active_rooms": len(active_rooms),
             "total_users": total_users,
             "total_messages": total_messages,
+            "total_reactions": total_reactions,
             "pending_call_signals": sum(len(signals) for signals in call_signals.values()),
             "server_time": datetime.now().isoformat()
         })
@@ -515,6 +679,9 @@ if __name__ == '__main__':
     print(f"   POST /join_room - Join existing room") 
     print(f"   POST /send - Send message")
     print(f"   GET  /receive - Receive messages")
+    print(f"   POST /add_reaction - Add reaction to message")
+    print(f"   POST /remove_reaction - Remove reaction from message")
+    print(f"   GET  /get_reactions - Get reactions for message")
     print(f"   GET  /room_info - Get room info")
     print(f"   POST /call_signal - Send call signal")
     print(f"   GET  /get_call_signals - Get pending call signals")
