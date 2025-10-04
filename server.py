@@ -642,30 +642,351 @@ def cleanup_rooms():
         print(f"❌ Error in /cleanup: {e}")
         return jsonify({"error": "Server error"}), 500
 
-# 🔐 Существующие endpoint'ы остаются без изменений
-# (add_reaction, remove_reaction, get_reactions, media, call_signal, get_call_signals, end_call)
+# 🔐 Эндпоинты для реакций
+@app.route('/add_reaction', methods=['POST', 'OPTIONS'])
+def add_reaction():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
+    try:
+        data = request.get_json()
+        message_id = data.get('message_id')
+        username = data.get('username')
+        emoji = data.get('emoji')
+        room_id = data.get('room_id')
+        
+        if not all([message_id, username, emoji]):
+            return jsonify({"error": "Message ID, username and emoji are required"}), 400
+            
+        if username not in user_rooms:
+            return jsonify({"error": "User not in any room"}), 400
+        
+        user_room_id = user_rooms[username]
+        
+        # Проверяем что пользователь пытается добавить реакцию в своей комнате
+        if room_id and room_id != user_room_id:
+            return jsonify({"error": "Cannot add reaction to message in different room"}), 403
+        
+        room_id = user_room_id
+        
+        if room_id not in rooms:
+            return jsonify({"error": "Room not found"}), 404
+            
+        room = rooms[room_id]
+        
+        # Ищем сообщение
+        target_message = None
+        for msg in room['messages']:
+            if msg['id'] == message_id:
+                target_message = msg
+                break
+        
+        if not target_message:
+            return jsonify({"error": "Message not found"}), 404
+        
+        # Инициализируем реакции для сообщения если их еще нет
+        if message_id not in room['reactions']:
+            room['reactions'][message_id] = {}
+        
+        # Инициализируем список пользователей для эмодзи если его еще нет
+        if emoji not in room['reactions'][message_id]:
+            room['reactions'][message_id][emoji] = []
+        
+        # Добавляем пользователя в реакции если его там еще нет
+        if username not in room['reactions'][message_id][emoji]:
+            room['reactions'][message_id][emoji].append(username)
+        
+        print(f"👍 Reaction added: {username} added {emoji} to message {message_id} in room {room_id}")
+        
+        return jsonify({
+            "status": "reaction_added",
+            "message_id": message_id,
+            "emoji": emoji,
+            "username": username,
+            "reactions": room['reactions'][message_id]
+        })
+        
+    except Exception as e:
+        print(f"❌ Error in /add_reaction: {e}")
+        return jsonify({"error": "Server error"}), 500
+
+@app.route('/remove_reaction', methods=['POST', 'OPTIONS'])
+def remove_reaction():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
+    try:
+        data = request.get_json()
+        message_id = data.get('message_id')
+        username = data.get('username')
+        emoji = data.get('emoji')
+        room_id = data.get('room_id')
+        
+        if not all([message_id, username, emoji]):
+            return jsonify({"error": "Message ID, username and emoji are required"}), 400
+            
+        if username not in user_rooms:
+            return jsonify({"error": "User not in any room"}), 400
+        
+        user_room_id = user_rooms[username]
+        
+        # Проверяем что пользователь пытается удалить реакцию в своей комнате
+        if room_id and room_id != user_room_id:
+            return jsonify({"error": "Cannot remove reaction from message in different room"}), 403
+        
+        room_id = user_room_id
+        
+        if room_id not in rooms:
+            return jsonify({"error": "Room not found"}), 404
+            
+        room = rooms[room_id]
+        
+        # Проверяем что сообщение существует и есть реакции
+        if message_id not in room['reactions']:
+            return jsonify({"error": "No reactions found for this message"}), 404
+        
+        if emoji not in room['reactions'][message_id]:
+            return jsonify({"error": "No such reaction found"}), 404
+        
+        # Удаляем пользователя из реакций
+        if username in room['reactions'][message_id][emoji]:
+            room['reactions'][message_id][emoji].remove(username)
+            
+            # Если больше нет пользователей для этой эмодзи, удаляем эмодзи
+            if not room['reactions'][message_id][emoji]:
+                del room['reactions'][message_id][emoji]
+            
+            # Если больше нет реакций для сообщения, удаляем запись
+            if not room['reactions'][message_id]:
+                del room['reactions'][message_id]
+        
+        print(f"👎 Reaction removed: {username} removed {emoji} from message {message_id} in room {room_id}")
+        
+        return jsonify({
+            "status": "reaction_removed",
+            "message_id": message_id,
+            "emoji": emoji,
+            "username": username,
+            "reactions": room['reactions'].get(message_id, {})
+        })
+        
+    except Exception as e:
+        print(f"❌ Error in /remove_reaction: {e}")
+        return jsonify({"error": "Server error"}), 500
+
+@app.route('/get_reactions', methods=['GET'])
+def get_reactions():
+    try:
+        message_id = request.args.get('message_id')
+        room_id = request.args.get('room_id')
+        
+        if not message_id or not room_id:
+            return jsonify({"error": "Message ID and Room ID are required"}), 400
+            
+        if room_id not in rooms:
+            return jsonify({"error": "Room not found"}), 404
+            
+        room = rooms[room_id]
+        
+        reactions = room['reactions'].get(int(message_id), {})
+        
+        return jsonify({
+            "message_id": message_id,
+            "reactions": reactions
+        })
+        
+    except Exception as e:
+        print(f"❌ Error in /get_reactions: {e}")
+        return jsonify({"error": "Server error"}), 500
+
+# Эндпоинты для медиа
+@app.route('/media/<media_id>', methods=['GET'])
+def get_media(media_id):
+    try:
+        # Ищем медиа во всех комнатах
+        for room_id, room in rooms.items():
+            if media_id in room['media']:
+                media_data = room['media'][media_id]
+                # Определяем тип контента
+                if media_data.startswith('data:image'):
+                    return jsonify({"data": media_data, "type": "image"})
+                elif media_data.startswith('data:audio'):
+                    return jsonify({"data": media_data, "type": "audio"})
+                else:
+                    return jsonify({"data": media_data, "type": "unknown"})
+        
+        return jsonify({"error": "Media not found"}), 404
+        
+    except Exception as e:
+        print(f"❌ Error in /media: {e}")
+        return jsonify({"error": "Server error"}), 500
+
+# Эндпоинты для звонков
+@app.route('/call_signal', methods=['POST', 'OPTIONS'])
+def call_signal():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
+    try:
+        data = request.get_json()
+        from_user = data.get('from_user')
+        to_user = data.get('to_user')
+        signal_type = data.get('type')  # 'offer', 'answer', 'ice-candidate'
+        signal_data = data.get('data')
+        
+        if not all([from_user, to_user, signal_type, signal_data]):
+            return jsonify({"error": "Missing required fields"}), 400
+        
+        # Инициализируем список сигналов для пользователя если его еще нет
+        if to_user not in call_signals:
+            call_signals[to_user] = []
+        
+        # Добавляем сигнал
+        call_signals[to_user].append({
+            'from_user': from_user,
+            'type': signal_type,
+            'data': signal_data,
+            'timestamp': datetime.now().isoformat()
+        })
+        
+        print(f"📞 Call signal from {from_user} to {to_user}: {signal_type}")
+        
+        return jsonify({"status": "signal_sent"})
+        
+    except Exception as e:
+        print(f"❌ Error in /call_signal: {e}")
+        return jsonify({"error": "Server error"}), 500
+
+@app.route('/get_call_signals', methods=['GET'])
+def get_call_signals():
+    try:
+        username = request.args.get('username')
+        
+        if not username:
+            return jsonify({"error": "Username is required"}), 400
+        
+        signals = call_signals.get(username, [])
+        
+        # Очищаем полученные сигналы
+        if username in call_signals:
+            call_signals[username] = []
+        
+        return jsonify({"signals": signals})
+        
+    except Exception as e:
+        print(f"❌ Error in /get_call_signals: {e}")
+        return jsonify({"error": "Server error"}), 500
+
+# Эндпоинт для выхода из комнаты
+@app.route('/leave_room', methods=['POST', 'OPTIONS'])
+def leave_room():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
+    try:
+        data = request.get_json()
+        username = data.get('username')
+        
+        if not username:
+            return jsonify({"error": "Username is required"}), 400
+            
+        if username not in user_rooms:
+            return jsonify({"error": "User not in any room"}), 400
+        
+        room_id = user_rooms[username]
+        
+        if room_id not in rooms:
+            return jsonify({"error": "Room not found"}), 404
+            
+        room = rooms[room_id]
+        
+        # Удаляем пользователя из комнаты
+        room['users'].discard(username)
+        del user_rooms[username]
+        
+        # Добавляем системное сообщение о выходе
+        system_message = {
+            'id': room['next_id'],
+            'user': 'System',
+            'text': f'{username} left the room',
+            'time': datetime.now().isoformat(),
+            'type': 'system'
+        }
+        room['messages'].append(system_message)
+        room['next_id'] += 1
+        
+        # Если комната пустая, удаляем ее через 5 минут (можно настроить таймер)
+        if len(room['users']) == 0:
+            print(f"🏠 Room {room_id} is empty, will be deleted soon")
+        
+        print(f"👋 User {username} left room {room_id}")
+        
+        return jsonify({"status": "left"})
+        
+    except Exception as e:
+        print(f"❌ Error in /leave_room: {e}")
+        return jsonify({"error": "Server error"}), 500
+
+# 🔐 Эндпоинт для сброса попыток верификации (для тестирования)
+@app.route('/reset_verification_attempts', methods=['POST'])
+def reset_verification_attempts():
+    """Сброс попыток верификации (только для разработки)"""
+    try:
+        key_verification_attempts.clear()
+        print("🔄 Verification attempts reset")
+        return jsonify({"status": "reset", "message": "All verification attempts have been reset"})
+    except Exception as e:
+        print(f"❌ Error resetting verification attempts: {e}")
+        return jsonify({"error": "Server error"}), 500
+
+# 🔐 Эндпоинт для получения статуса безопасности
+@app.route('/security_status', methods=['GET'])
+def security_status():
+    """Получение общего статуса безопасности сервера"""
+    try:
+        total_rooms = len(rooms)
+        encrypted_rooms_count = len(encrypted_rooms)
+        active_verification_attempts = len(key_verification_attempts)
+        
+        # Анализ безопасности
+        security_level = "HIGH" if encrypted_rooms_count > total_rooms * 0.7 else "MEDIUM"
+        if total_rooms == 0:
+            security_level = "UNKNOWN"
+        
+        return jsonify({
+            "security_level": security_level,
+            "total_rooms": total_rooms,
+            "encrypted_rooms": encrypted_rooms_count,
+            "encryption_rate": f"{(encrypted_rooms_count / total_rooms * 100) if total_rooms > 0 else 0:.1f}%",
+            "active_verification_attempts": active_verification_attempts,
+            "room_keys_stored": len(room_keys),
+            "recommendations": [
+                "Use encrypted rooms for sensitive conversations",
+                "Regularly update your encryption keys",
+                "Verify room keys before joining encrypted rooms"
+            ],
+            "server_time": datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        print(f"❌ Error in /security_status: {e}")
+        return jsonify({"error": "Server error"}), 500
 
 # Запуск сервера
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    print(f"🚀 Starting Secure Flask server with CORS on port {port}")
-    print(f"📊 Available endpoints:")
-    print(f"   POST /create_room - Create new room (with encryption support) 🔐")
-    print(f"   POST /join_room - Join existing room (with key verification) 🔐") 
-    print(f"   POST /send - Send message (encrypted or standard) 🔐")
-    print(f"   GET  /receive - Receive messages 🔐")
-    print(f"   POST /verify_key - Verify encryption key 🔐")
-    print(f"   GET  /room_encryption_info - Get room encryption info 🔐")
-    print(f"   POST /add_reaction - Add reaction to message")
-    print(f"   POST /remove_reaction - Remove reaction from message")
-    print(f"   GET  /get_reactions - Get reactions for message")
-    print(f"   GET  /room_info - Get room info")
-    print(f"   POST /call_signal - Send call signal")
-    print(f"   GET  /get_call_signals - Get pending call signals")
-    print(f"   POST /end_call - End call")
-    print(f"   GET  /stats - Server statistics (with encryption stats) 🔐")
-    print(f"   POST /cleanup - Cleanup old rooms")
-    print(f"🔐 Hybrid encryption system: ✓ ENABLED")
-    print(f"🔐 Encrypted rooms: {len(encrypted_rooms)}")
-    print(f"🔐 Total rooms: {len(rooms)}")
+    port = int(os.environ.get('PORT', 5000))
+    print(f"🚀 Starting Secure Chat Server on port {port}...")
+    print("📡 Endpoints available:")
+    print("   POST /create_room - Create a new chat room")
+    print("   POST /join_room - Join an existing room") 
+    print("   POST /send - Send a message")
+    print("   GET  /receive - Receive new messages")
+    print("   POST /add_reaction - Add reaction to message")
+    print("   POST /remove_reaction - Remove reaction from message")
+    print("   GET  /get_reactions - Get reactions for message")
+    print("   🔐 POST /verify_key - Verify encryption key")
+    print("   🔐 GET  /room_encryption_info - Get room encryption info")
+    print("   🔐 GET  /security_status - Get server security status")
+    print("   📊 GET  /stats - Get server statistics")
+    
     app.run(host='0.0.0.0', port=port, debug=False)
