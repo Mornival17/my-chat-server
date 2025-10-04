@@ -224,7 +224,7 @@ def verify_encryption_key(room_id, user_public_key, verification_data):
         print(f"❌ Key verification error: {e}")
         return False
 
-# 🔐 Отправка сообщений (поддержка зашифрованных сообщений)
+# 🔐 Отправка сообщений (ИСПРАВЛЕННАЯ - поддержка медиа в зашифрованных комнатах)
 @app.route('/send', methods=['POST', 'OPTIONS'])
 def send_message():
     if request.method == 'OPTIONS':
@@ -274,24 +274,25 @@ def send_message():
                 "is_encrypted": False
             }), 400
         
-        # Для незашифрованных комнат проверяем наличие контента
-        if not room['is_encrypted'] and not text and not image_data and not audio_data:
-            return jsonify({"error": "Empty message"}), 400
+        # 🔐 ИСПРАВЛЕНИЕ: Для зашифрованных комнат разрешаем медиа без encrypted_data
+        if room['is_encrypted']:
+            # Для зашифрованных комнат проверяем наличие либо зашифрованных данных, либо медиа
+            if not encrypted_data and not image_data and not audio_data and not text:
+                return jsonify({"error": "Empty message"}), 400
+        else:
+            # Для незашифрованных комнат стандартная проверка
+            if not text and not image_data and not audio_data:
+                return jsonify({"error": "Empty message"}), 400
         
-        # Для зашифрованных комнат проверяем наличие зашифрованных данных
-        if room['is_encrypted'] and not encrypted_data:
-            return jsonify({"error": "Encrypted data required"}), 400
-        
-        # Автоматически определяем тип сообщения по наличию медиа (только для незашифрованных)
-        if not room['is_encrypted']:
-            if image_data:
-                message_type = 'image'
-                if not text:
-                    text = '🖼️ Image'
-            elif audio_data:
-                message_type = 'audio'
-                if not text:
-                    text = '🎤 Voice message'
+        # Автоматически определяем тип сообщения по наличию медиа
+        if image_data:
+            message_type = 'image'
+            if not text:
+                text = '🖼️ Image'
+        elif audio_data:
+            message_type = 'audio'
+            if not text:
+                text = '🎤 Voice message'
         
         # Создаем объект сообщения
         message = {
@@ -308,22 +309,21 @@ def send_message():
             'encryption_metadata': encryption_metadata
         }
         
-        # Сохраняем медиаданные если они есть (только для незашифрованных комнат)
-        if not room['is_encrypted']:
-            if image_data:
-                # Генерируем уникальный ID для изображения
-                image_id = str(uuid.uuid4())
-                message['image_id'] = image_id
-                # Сохраняем Base64 данные изображения
-                room['media'][image_id] = image_data
-                print(f"📸 Image saved with ID: {image_id}")
-            
-            if audio_data:
-                # Генерируем уникальный ID для аудио
-                audio_id = str(uuid.uuid4())
-                message['audio_id'] = audio_id
-                room['media'][audio_id] = audio_data
-                print(f"🎵 Audio saved with ID: {audio_id}")
+        # 🔐 ИСПРАВЛЕНИЕ: Сохраняем медиаданные для ВСЕХ комнат (и зашифрованных, и обычных)
+        if image_data:
+            # Генерируем уникальный ID для изображения
+            image_id = str(uuid.uuid4())
+            message['image_id'] = image_id
+            # Сохраняем Base64 данные изображения
+            room['media'][image_id] = image_data
+            print(f"📸 Image saved with ID: {image_id}")
+        
+        if audio_data:
+            # Генерируем уникальный ID для аудио
+            audio_id = str(uuid.uuid4())
+            message['audio_id'] = audio_id
+            room['media'][audio_id] = audio_data
+            print(f"🎵 Audio saved with ID: {audio_id}")
         
         # Сохраняем сообщение в комнату
         room['messages'].append(message)
@@ -334,12 +334,11 @@ def send_message():
             # Удаляем также медиафайлы и реакции старых сообщений
             removed_messages = room['messages'][:-100]
             for msg in removed_messages:
-                # Удаляем медиа (только для незашифрованных)
-                if not room['is_encrypted']:
-                    if 'image_id' in msg and msg['image_id'] in room['media']:
-                        del room['media'][msg['image_id']]
-                    if 'audio_id' in msg and msg['audio_id'] in room['media']:
-                        del room['media'][msg['audio_id']]
+                # Удаляем медиа
+                if 'image_id' in msg and msg['image_id'] in room['media']:
+                    del room['media'][msg['image_id']]
+                if 'audio_id' in msg and msg['audio_id'] in room['media']:
+                    del room['media'][msg['audio_id']]
                 # Удаляем реакции
                 if msg['id'] in room['reactions']:
                     del room['reactions'][msg['id']]
@@ -355,12 +354,11 @@ def send_message():
             "is_encrypted": is_encrypted_payload  # 🔐 Новое поле
         }
         
-        # Добавляем ID медиафайлов в ответ если они есть (только для незашифрованных)
-        if not room['is_encrypted']:
-            if 'image_id' in message:
-                response_data['image_id'] = message['image_id']
-            if 'audio_id' in message:
-                response_data['audio_id'] = message['audio_id']
+        # Добавляем ID медиафайлов в ответ если они есть
+        if 'image_id' in message:
+            response_data['image_id'] = message['image_id']
+        if 'audio_id' in message:
+            response_data['audio_id'] = message['audio_id']
             
         return jsonify(response_data)
         
@@ -403,11 +401,11 @@ def receive_messages():
                 if msg['type'] != 'system' and msg.get('is_encrypted'):
                     # Не показываем исходный текст, только зашифрованные данные
                     msg['text'] = '🔒 Encrypted message'
-                    # Очищаем медиа поля для зашифрованных сообщений
-                    if 'image_id' in msg:
-                        del msg['image_id']
-                    if 'audio_id' in msg:
-                        del msg['audio_id']
+                # 🔐 ИСПРАВЛЕНИЕ: Для зашифрованных комнат ВСЕГДА добавляем медиаданные
+                if 'image_id' in msg and msg['image_id'] in room['media']:
+                    msg['image_data'] = room['media'][msg['image_id']]
+                if 'audio_id' in msg and msg['audio_id'] in room['media']:
+                    msg['audio_data'] = room['media'][msg['audio_id']]
         else:
             # Для незашифрованных комнат добавляем медиаданные как обычно
             for msg in new_messages:
