@@ -4,34 +4,55 @@ import os
 import secrets
 import uuid
 from flask_cors import CORS
+import time
 
 # Создаем Flask приложение
 app = Flask(__name__)
-# Разрешаем все CORS запросы (чтобы фронтенд мог общаться с сервером)
+# 🔐 Разрешаем CORS для локальных файлов
 CORS(app)
 
+# 🔐 Защита от брутфорса
+bruteforce_attempts = {}
+MAX_ATTEMPTS_PER_IP = 10
+BLOCK_TIME = 300  # 5 минут
+
 # Глобальные переменные для хранения данных
-
-# rooms хранит информацию о всех комнатах
-# Формат: {room_id: {name: str, password: str, created_at: str, users: set, messages: [], next_id: int, media: {}, reactions: {}}}
 rooms = {}
-
-# user_rooms хранит связь пользователь -> комната
-# Формат: {username: room_id}
 user_rooms = {}
-
-# call_signals хранит сигналы звонков для пользователей
-# Формат: {username: [list_of_signals]}
 call_signals = {}
-
-# 🔐 Новые структуры для шифрования
-room_keys = {}  # {room_id: public_key} - публичные ключи комнат
-encrypted_rooms = set()  # Множество ID зашифрованных комнат
-key_verification_attempts = {}  # {room_id: {username: attempts}} - для защиты от брутфорса
+room_keys = {}
+encrypted_rooms = set()
+key_verification_attempts = {}
 
 def generate_room_id():
     """Генерация уникального ID комнаты"""
     return secrets.token_urlsafe(8)
+
+def check_bruteforce(ip):
+    """🔐 Проверка защиты от брутфорса"""
+    current_time = time.time()
+    
+    # Очищаем старые записи
+    if ip in bruteforce_attempts:
+        bruteforce_attempts[ip] = [
+            attempt_time for attempt_time in bruteforce_attempts[ip]
+            if current_time - attempt_time < BLOCK_TIME
+        ]
+    
+    # Проверяем лимит
+    if ip in bruteforce_attempts and len(bruteforce_attempts[ip]) >= MAX_ATTEMPTS_PER_IP:
+        return False  # Блокировка
+    
+    # Добавляем текущую попытку
+    if ip not in bruteforce_attempts:
+        bruteforce_attempts[ip] = []
+    bruteforce_attempts[ip].append(current_time)
+    
+    return True  # Разрешено
+
+def get_client_ip():
+    """Получение IP клиента"""
+    return request.remote_addr
 
 # Базовые endpoint'ы
 @app.route('/')
@@ -42,14 +63,13 @@ def home():
 def health():
     return "OK"
 
-# 🔐 Создание комнаты (расширенное с поддержкой шифрования)
+# Создание комнаты (оставляем как было)
 @app.route('/create_room', methods=['POST', 'OPTIONS'])
 def create_room():
     if request.method == 'OPTIONS':
         return '', 200
         
     try:
-        # Получаем данные из запроса
         data = request.get_json()
         room_name = data.get('room_name', 'New Room')
         password = data.get('password', '')
@@ -59,26 +79,26 @@ def create_room():
         is_encrypted = data.get('is_encrypted', False)
         public_key = data.get('public_key', '')
         
-        # Генерируем уникальный ID комнаты
-        room_id = generate_room_id()
-        
         # 🔐 Валидация для зашифрованных комнат
         if is_encrypted and not public_key:
             return jsonify({"error": "Public key required for encrypted room"}), 400
         
+        # Генерируем уникальный ID комнаты
+        room_id = generate_room_id()
+        
         # Создаем комнату со всей необходимой информацией
         rooms[room_id] = {
-            'name': room_name,                    # Название комнаты
-            'password': password,                 # Пароль (может быть пустым)
-            'created_at': datetime.now().isoformat(),  # Время создания
-            'users': set([username]),             # Множество пользователей
-            'messages': [],                       # Список сообщений
-            'next_id': 1,                         # Следующий ID сообщения
-            'media': {},                          # Хранилище медиафайлов
-            'reactions': {},                      # Хранилище реакций: {message_id: {emoji: [usernames]}}
+            'name': room_name,
+            'password': password,
+            'created_at': datetime.now().isoformat(),
+            'users': set([username]),
+            'messages': [],
+            'next_id': 1,
+            'media': {},
+            'reactions': {},
             # 🔐 Новые поля для шифрования
-            'is_encrypted': is_encrypted,         # Флаг шифрования комнаты
-            'public_key': public_key,             # Публичный ключ комнаты
+            'is_encrypted': is_encrypted,
+            'public_key': public_key,
             'encryption_enabled_at': datetime.now().isoformat() if is_encrypted else None
         }
         
@@ -94,12 +114,11 @@ def create_room():
         print(f"🎉 Room created: {room_name} (ID: {room_id}) by {username}")
         print(f"🔐 Encryption: {is_encrypted}")
         
-        # Возвращаем успешный ответ
         return jsonify({
             "status": "created", 
             "room_id": room_id,
             "room_name": room_name,
-            "is_encrypted": is_encrypted,  # 🔐 Новое поле
+            "is_encrypted": is_encrypted,
             "security_level": "high" if is_encrypted else "standard"
         })
         
@@ -107,13 +126,21 @@ def create_room():
         print(f"❌ Error in /create_room: {e}")
         return jsonify({"error": "Server error"}), 500
 
-# 🔐 Присоединение к комнате (расширенное с проверкой ключей)
+# Присоединение к комнате с защитой от брутфорса
 @app.route('/join_room', methods=['POST', 'OPTIONS'])
 def join_room():
     if request.method == 'OPTIONS':
         return '', 200
         
     try:
+        # 🔐 Проверяем защиту от брутфорса
+        client_ip = get_client_ip()
+        if not check_bruteforce(client_ip):
+            return jsonify({
+                "error": "Too many attempts. Please wait 5 minutes.",
+                "blocked": True
+            }), 429
+            
         data = request.get_json()
         room_id = data.get('room_id')
         password = data.get('password', '')
@@ -146,7 +173,7 @@ def join_room():
                     "key_required": True
                 }), 401
             
-            # Проверяем не превышено ли количество попыток
+            # 🔐 Проверяем не превышено ли количество попыток
             attempt_key = f"{room_id}:{username}"
             current_attempts = key_verification_attempts.get(attempt_key, 0)
             if current_attempts >= 3:
@@ -156,7 +183,7 @@ def join_room():
                     "blocked": True
                 }), 429
             
-            # 🔐 Простая проверка ключа (в реальной системе нужно сложнее)
+            # 🔐 Простая проверка ключа
             if not verify_encryption_key(room_id, public_key, key_verification_data):
                 key_verification_attempts[attempt_key] = current_attempts + 1
                 return jsonify({
@@ -191,8 +218,8 @@ def join_room():
             "status": "joined",
             "room_name": room['name'],
             "users": list(room['users']),
-            "is_encrypted": room['is_encrypted'],  # 🔐 Новое поле
-            "public_key": room.get('public_key'),  # 🔐 Для новых пользователей
+            "is_encrypted": room['is_encrypted'],
+            "public_key": room.get('public_key'),
             "security_level": "high" if room['is_encrypted'] else "standard"
         })
         
@@ -204,8 +231,6 @@ def verify_encryption_key(room_id, user_public_key, verification_data):
     """🔐 Проверка ключа шифрования"""
     try:
         # В реальной системе здесь должна быть сложная проверка
-        # Например, challenge-response protocol
-        
         # Для демо - просто проверяем что ключ предоставлен и имеет правильный формат
         if not user_public_key or len(user_public_key) < 100:
             return False
@@ -215,7 +240,6 @@ def verify_encryption_key(room_id, user_public_key, verification_data):
             return False
             
         # Здесь можно добавить реальную криптографическую проверку
-        # Например, отправить тестовое сообщение для расшифровки
         
         print(f"🔐 Key verification for room {room_id}: SUCCESS")
         return True
@@ -224,7 +248,7 @@ def verify_encryption_key(room_id, user_public_key, verification_data):
         print(f"❌ Key verification error: {e}")
         return False
 
-# 🔐 Отправка сообщений (ИСПРАВЛЕННАЯ - поддержка медиа в зашифрованных комнатах)
+# Отправка сообщений (оставляем как было)
 @app.route('/send', methods=['POST', 'OPTIONS'])
 def send_message():
     if request.method == 'OPTIONS':
@@ -234,11 +258,11 @@ def send_message():
         data = request.get_json()
         username = data.get('username')
         text = data.get('text', '').strip()
-        image_data = data.get('image')  # Base64 encoded image
-        audio_data = data.get('audio')  # Base64 encoded audio
-        message_type = data.get('type', 'text')  # text, image, audio
-        reply_to = data.get('reply_to')  # ID сообщения, на которое отвечаем
-        self_destruct = data.get('self_destruct', False)  # Самоуничтожающееся сообщение
+        image_data = data.get('image')
+        audio_data = data.get('audio')
+        message_type = data.get('type', 'text')
+        reply_to = data.get('reply_to')
+        self_destruct = data.get('self_destruct', False)
         
         # 🔐 Новые поля для зашифрованных сообщений
         encrypted_data = data.get('encrypted_data')
@@ -309,7 +333,7 @@ def send_message():
             'encryption_metadata': encryption_metadata
         }
         
-        # 🔐 ИСПРАВЛЕНИЕ: Сохраняем медиаданные для ВСЕХ комнат (и зашифрованных, и обычных)
+        # 🔐 ИСПРАВЛЕНИЕ: Сохраняем медиаданные для ВСЕХ комнат
         if image_data:
             # Генерируем уникальный ID для изображения
             image_id = str(uuid.uuid4())
@@ -351,7 +375,7 @@ def send_message():
         response_data = {
             "status": "sent", 
             "message_id": message['id'],
-            "is_encrypted": is_encrypted_payload  # 🔐 Новое поле
+            "is_encrypted": is_encrypted_payload
         }
         
         # Добавляем ID медиафайлов в ответ если они есть
@@ -366,7 +390,7 @@ def send_message():
         print(f"❌ Error in /send: {e}")
         return jsonify({"error": "Server error"}), 500
 
-# 🔐 Получение сообщений (поддержка зашифрованных сообщений)
+# Получение сообщений (оставляем как было)
 @app.route('/receive', methods=['GET'])
 def receive_messages():
     try:
@@ -392,10 +416,8 @@ def receive_messages():
             if msg['id'] > since_id
         ]
         
-        # 🔐 Обрабатываем сообщения в зависимости от типа комнаты
+        # 🔐 ОБНОВЛЯЕМ ИНФОРМАЦИЮ О КОМНАТЕ
         if room['is_encrypted']:
-            # Для зашифрованных комнат оставляем зашифрованные данные как есть
-            # Фронтенд сам будет расшифровывать
             for msg in new_messages:
                 # Для системных сообщений оставляем текст как есть
                 if msg['type'] != 'system' and msg.get('is_encrypted'):
@@ -425,9 +447,9 @@ def receive_messages():
             "messages": new_messages,
             "users": list(room['users']),
             "room_name": room['name'],
-            "reactions": room['reactions'],  # Отправляем все реакции комнаты
-            "is_encrypted": room['is_encrypted'],  # 🔐 Новое поле
-            "public_key": room.get('public_key')  # 🔐 Для новых пользователей
+            "reactions": room['reactions'],
+            "is_encrypted": room['is_encrypted'],
+            "public_key": room.get('public_key')
         })
         
     except Exception as e:
@@ -537,8 +559,8 @@ def room_info():
             "users_count": len(room['users']),
             "created_at": room['created_at'],
             "messages_count": len(room['messages']),
-            "is_encrypted": room['is_encrypted'],  # 🔐 Новое поле
-            "security_level": "🔒 Encrypted" if room['is_encrypted'] else "🔓 Standard",  # 🔐 Новое поле
+            "is_encrypted": room['is_encrypted'],
+            "security_level": "🔒 Encrypted" if room['is_encrypted'] else "🔓 Standard",
             "security_description": "End-to-end encrypted" if room['is_encrypted'] else "Standard security"
         })
         
@@ -591,7 +613,7 @@ def get_stats():
         print(f"❌ Error in /stats: {e}")
         return jsonify({"error": "Server error"}), 500
 
-# 🔐 Очистка старых комнат (расширенная)
+# 🔐 Очистка старых комнат
 @app.route('/cleanup', methods=['POST'])
 def cleanup_rooms():
     """Очистка комнат старше 24 часов"""
@@ -640,7 +662,7 @@ def cleanup_rooms():
         print(f"❌ Error in /cleanup: {e}")
         return jsonify({"error": "Server error"}), 500
 
-# 🔐 Эндпоинты для реакций (ИСПРАВЛЕННЫЕ)
+# 🔐 Эндпоинты для реакций
 @app.route('/add_reaction', methods=['POST', 'OPTIONS'])
 def add_reaction():
     if request.method == 'OPTIONS':
@@ -812,7 +834,7 @@ def call_signal():
         data = request.get_json()
         from_user = data.get('from_user')
         to_user = data.get('to_user')
-        signal_type = data.get('type')  # 'offer', 'answer', 'ice-candidate'
+        signal_type = data.get('type')
         signal_data = data.get('data')
         
         if not all([from_user, to_user, signal_type, signal_data]):
@@ -845,7 +867,7 @@ def get_call_signals():
             return jsonify({"error": "Username is required"}), 400
         
         signals = call_signals.get(username, [])
-        call_signals[username] = []  # Clear signals after reading
+        call_signals[username] = []
         
         return jsonify({
             "signals": signals
@@ -903,6 +925,7 @@ def leave_room():
 # Запуск сервера
 if __name__ == '__main__':
     print("🚀 Starting Secure Chat Server...")
+    print("🔐 Added bruteforce protection (10 attempts per 5 minutes)")
     print("📡 Endpoints available:")
     print("   POST /create_room - Create a new chat room")
     print("   POST /join_room - Join an existing room") 
