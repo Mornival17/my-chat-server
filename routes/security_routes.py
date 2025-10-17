@@ -7,6 +7,7 @@ from config import Config
 
 security_bp = Blueprint('security', __name__)
 
+
 @security_bp.route('/verify_key', methods=['POST', 'OPTIONS'])
 def verify_key():
     if request.method == 'OPTIONS':

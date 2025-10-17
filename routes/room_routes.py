@@ -3,17 +3,11 @@ from datetime import datetime
 from utils.helpers import generate_room_id, get_current_time
 from models.data_store import rooms, user_rooms, room_keys, encrypted_rooms
 from security.bruteforce_protection import check_bruteforce, get_client_ip
+from security.advanced_bruteforce import advanced_bruteforce_protection
+from security.password_manager import password_manager
 from security.encryption import verify_encryption_key
 
 room_bp = Blueprint('room', __name__)
-
-@room_bp.route('/')
-def home():
-    return "🚀 Secure Chat Server Ready! Use /create_room, /join_room, /send and /receive"
-
-@room_bp.route('/health')
-def health():
-    return "OK"
 
 @room_bp.route('/create_room', methods=['POST', 'OPTIONS'])
 def create_room():
@@ -37,10 +31,13 @@ def create_room():
         # Генерируем уникальный ID комнаты
         room_id = generate_room_id()
         
+        # 🔐 Сохраняем пароль с улучшенной безопасностью
+        password_manager.store_room_password(room_id, password)
+        
         # Создаем комнату со всей необходимой информацией
         rooms[room_id] = {
             'name': room_name,
-            'password': password,
+            'password': '',  # 🔐 Больше не храним пароль в открытом виде
             'created_at': get_current_time(),
             'users': set([username]),
             'messages': [],
@@ -64,12 +61,14 @@ def create_room():
         
         print(f"🎉 Room created: {room_name} (ID: {room_id}) by {username}")
         print(f"🔐 Encryption: {is_encrypted}")
+        print(f"🔒 Password protected: {bool(password)}")
         
         return jsonify({
             "status": "created", 
             "room_id": room_id,
             "room_name": room_name,
             "is_encrypted": is_encrypted,
+            "has_password": bool(password),
             "security_level": "high" if is_encrypted else "standard"
         })
         
@@ -83,16 +82,20 @@ def join_room():
         return '', 200
         
     try:
-        # 🔐 Проверяем защиту от брутфорса
+        # 🔐 Улучшенная защита от брутфорса
         client_ip = get_client_ip(request)
-        if not check_bruteforce(client_ip):
-            return jsonify({
-                "error": "Too many attempts. Please wait 5 minutes.",
-                "blocked": True
-            }), 429
-            
         data = request.get_json()
         room_id = data.get('room_id')
+        
+        # Проверяем с учетом комнаты для лучшей точности
+        if not advanced_bruteforce_protection.check_bruteforce(client_ip, room_id):
+            attempts_info = advanced_bruteforce_protection.get_attempts_info(client_ip, room_id)
+            return jsonify({
+                "error": "Too many attempts. Please wait 1 hour.",
+                "blocked": True,
+                "attempts_count": attempts_info['attempts_count']
+            }), 429
+            
         password = data.get('password', '')
         username = data.get('username', 'Anonymous')
         
@@ -110,8 +113,8 @@ def join_room():
         
         room = rooms[room_id]
         
-        # Проверяем пароль если он установлен
-        if room['password'] and room['password'] != password:
+        # 🔐 Улучшенная проверка пароля
+        if not password_manager.verify_room_password(room_id, password):
             return jsonify({"error": "Invalid password"}), 401
         
         # 🔐 Проверяем ключ для зашифрованных комнат
@@ -169,7 +172,7 @@ def join_room():
         return jsonify({
             "status": "joined",
             "room_name": room['name'],
-            "users': list(room['users']),
+            "users": list(room['users']),
             "is_encrypted": room['is_encrypted'],
             "public_key": room.get('public_key'),
             "security_level": "high" if room['is_encrypted'] else "standard"
@@ -177,49 +180,4 @@ def join_room():
         
     except Exception as e:
         print(f"❌ Error in /join_room: {e}")
-        return jsonify({"error": "Server error"}), 500
-
-@room_bp.route('/leave_room', methods=['POST', 'OPTIONS'])
-def leave_room():
-    if request.method == 'OPTIONS':
-        return '', 200
-        
-    try:
-        data = request.get_json()
-        username = data.get('username')
-        
-        if not username:
-            return jsonify({"error": "Username is required"}), 400
-            
-        if username not in user_rooms:
-            return jsonify({"error": "User not in any room"}), 400
-        
-        room_id = user_rooms[username]
-        
-        if room_id not in rooms:
-            return jsonify({"error": "Room not found"}), 404
-            
-        room = rooms[room_id]
-        
-        # Удаляем пользователя из комнаты
-        room['users'].discard(username)
-        del user_rooms[username]
-        
-        # Добавляем системное сообщение о выходе
-        system_message = {
-            'id': room['next_id'],
-            'user': 'System',
-            'text': f'{username} left the room',
-            'time': get_current_time(),
-            'type': 'system'
-        }
-        room['messages'].append(system_message)
-        room['next_id'] += 1
-        
-        print(f"👋 User {username} left room {room_id}")
-        
-        return jsonify({"status": "left"})
-        
-    except Exception as e:
-        print(f"❌ Error in /leave_room: {e}")
         return jsonify({"error": "Server error"}), 500
