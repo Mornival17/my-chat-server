@@ -3,20 +3,18 @@ from datetime import datetime
 import os
 import secrets
 import uuid
-import hashlib
-import time
-import random
 from flask_cors import CORS
+import time
 
 # Создаем Flask приложение
 app = Flask(__name__)
 # 🔐 Разрешаем CORS для локальных файлов
 CORS(app)
 
-# 🔐 УЛУЧШЕННАЯ ЗАЩИТА ОТ БРУТФОРСА
+# 🔐 Защита от брутфорса
 bruteforce_attempts = {}
-MAX_ATTEMPTS_PER_HOUR = 5  # Уменьшаем лимит
-BLOCK_TIME = 3600  # 1 час блокировки
+MAX_ATTEMPTS_PER_IP = 10
+BLOCK_TIME = 300  # 5 минут
 
 # Глобальные переменные для хранения данных
 rooms = {}
@@ -30,69 +28,27 @@ def generate_room_id():
     """Генерация уникального ID комнаты"""
     return secrets.token_urlsafe(8)
 
-def create_password_hash(password, salt=None):
-    """🔐 Хешируем пароль, но храним только в RAM"""
-    salt = salt or secrets.token_bytes(32)
-    hash_obj = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 100000)
-    return {
-        'salt': salt.hex(),
-        'hash': hash_obj.hex(),
-        'created_at': time.time()
-    }
-
-def verify_password(password, stored_data):
-    """🔐 Проверяем пароль без постоянного хранения"""
-    try:
-        salt = bytes.fromhex(stored_data['salt'])
-        test_hash = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 100000)
-        return secrets.compare_digest(test_hash.hex(), stored_data['hash'])
-    except Exception:
-        return False
-
-def cleanup_old_attempts():
-    """🔐 Автоочистка старых записей брутфорса"""
+def check_bruteforce(ip):
+    """🔐 Проверка защиты от брутфорса"""
     current_time = time.time()
-    keys_to_delete = []
     
-    for key, attempts in bruteforce_attempts.items():
-        # Оставляем только свежие попытки
-        bruteforce_attempts[key] = [
-            t for t in attempts 
-            if current_time - t < BLOCK_TIME
-        ]
-        # Удаляем пустые записи
-        if not bruteforce_attempts[key]:
-            keys_to_delete.append(key)
-    
-    for key in keys_to_delete:
-        del bruteforce_attempts[key]
-
-def check_bruteforce(ip, room_id=None):
-    """🔐 УЛУЧШЕННАЯ защита с учетом комнат"""
-    current_time = time.time()
-    key = f"{ip}:{room_id}" if room_id else ip
-    
-    # Очистка старых попыток
-    if key in bruteforce_attempts:
-        bruteforce_attempts[key] = [
-            t for t in bruteforce_attempts[key] 
-            if current_time - t < BLOCK_TIME
+    # Очищаем старые записи
+    if ip in bruteforce_attempts:
+        bruteforce_attempts[ip] = [
+            attempt_time for attempt_time in bruteforce_attempts[ip]
+            if current_time - attempt_time < BLOCK_TIME
         ]
     
-    # Проверка лимита
-    if key in bruteforce_attempts and len(bruteforce_attempts[key]) >= MAX_ATTEMPTS_PER_HOUR:
-        return False
+    # Проверяем лимит
+    if ip in bruteforce_attempts and len(bruteforce_attempts[ip]) >= MAX_ATTEMPTS_PER_IP:
+        return False  # Блокировка
     
-    # Добавляем попытку
-    if key not in bruteforce_attempts:
-        bruteforce_attempts[key] = []
-    bruteforce_attempts[key].append(current_time)
+    # Добавляем текущую попытку
+    if ip not in bruteforce_attempts:
+        bruteforce_attempts[ip] = []
+    bruteforce_attempts[ip].append(current_time)
     
-    # Автоочистка старых записей (каждый 100 вызовов)
-    if random.random() < 0.01:
-        cleanup_old_attempts()
-    
-    return True
+    return True  # Разрешено
 
 def get_client_ip():
     """Получение IP клиента"""
@@ -107,7 +63,7 @@ def home():
 def health():
     return "OK"
 
-# Создание комнаты с улучшенной системой паролей
+# Создание комнаты (оставляем как было)
 @app.route('/create_room', methods=['POST', 'OPTIONS'])
 def create_room():
     if request.method == 'OPTIONS':
@@ -130,13 +86,10 @@ def create_room():
         # Генерируем уникальный ID комнаты
         room_id = generate_room_id()
         
-        # 🔐 УЛУЧШЕННАЯ СИСТЕМА ПАРОЛЕЙ: Храним хеш вместо plain text
-        password_data = create_password_hash(password) if password else None
-        
         # Создаем комнату со всей необходимой информацией
         rooms[room_id] = {
             'name': room_name,
-            'password_hash': password_data,  # 🔐 Заменяем plain text на хеш
+            'password': password,
             'created_at': datetime.now().isoformat(),
             'users': set([username]),
             'messages': [],
@@ -160,7 +113,6 @@ def create_room():
         
         print(f"🎉 Room created: {room_name} (ID: {room_id}) by {username}")
         print(f"🔐 Encryption: {is_encrypted}")
-        print(f"🔐 Password protected: {bool(password_data)}")
         
         return jsonify({
             "status": "created", 
@@ -174,26 +126,26 @@ def create_room():
         print(f"❌ Error in /create_room: {e}")
         return jsonify({"error": "Server error"}), 500
 
-# Присоединение к комнате с УЛУЧШЕННОЙ защитой от брутфорса
+# Присоединение к комнате с защитой от брутфорса
 @app.route('/join_room', methods=['POST', 'OPTIONS'])
 def join_room():
     if request.method == 'OPTIONS':
         return '', 200
         
     try:
+        # 🔐 Проверяем защиту от брутфорса
+        client_ip = get_client_ip()
+        if not check_bruteforce(client_ip):
+            return jsonify({
+                "error": "Too many attempts. Please wait 5 minutes.",
+                "blocked": True
+            }), 429
+            
         data = request.get_json()
         room_id = data.get('room_id')
         password = data.get('password', '')
         username = data.get('username', 'Anonymous')
         
-        # 🔐 УЛУЧШЕННАЯ защита от брутфорса с учетом комнаты
-        client_ip = get_client_ip()
-        if not check_bruteforce(client_ip, room_id):
-            return jsonify({
-                "error": "Too many attempts. Please wait 1 hour.",
-                "blocked": True
-            }), 429
-            
         # 🔐 Новые параметры для зашифрованных комнат
         key_verification_data = data.get('key_verification')
         public_key = data.get('public_key')
@@ -208,13 +160,9 @@ def join_room():
         
         room = rooms[room_id]
         
-        # 🔐 УЛУЧШЕННАЯ ПРОВЕРКА ПАРОЛЯ: Используем хеш вместо plain text
-        if room['password_hash']:
-            if not password:
-                return jsonify({"error": "Password required"}), 401
-            
-            if not verify_password(password, room['password_hash']):
-                return jsonify({"error": "Invalid password"}), 401
+        # Проверяем пароль если он установлен
+        if room['password'] and room['password'] != password:
+            return jsonify({"error": "Invalid password"}), 401
         
         # 🔐 Проверяем ключ для зашифрованных комнат
         if room['is_encrypted']:
@@ -291,85 +239,16 @@ def verify_encryption_key(room_id, user_public_key, verification_data):
         if room_id not in room_keys:
             return False
             
-        # 🔐 ГИБРИДНОЕ ШИФРОВАНИЕ: Проверяем что ключ поддерживает гибридную схему
-        # В реальной реализации здесь должна быть проверка структуры ключа
-        if not verification_data or 'encrypted_key' not in verification_data:
-            print("⚠️  Missing hybrid encryption data")
-            return False
-            
-        print(f"🔐 Hybrid key verification for room {room_id}: SUCCESS")
+        # Здесь можно добавить реальную криптографическую проверку
+        
+        print(f"🔐 Key verification for room {room_id}: SUCCESS")
         return True
         
     except Exception as e:
         print(f"❌ Key verification error: {e}")
         return False
 
-# 🔐 НОВЫЕ ЭНДПОИНТЫ ДЛЯ ГИБРИДНОГО ШИФРОВАНИЯ
-@app.route('/encrypt_hybrid', methods=['POST', 'OPTIONS'])
-def encrypt_hybrid():
-    """🔐 Эндпоинт для гибридного шифрования (симуляция)"""
-    if request.method == 'OPTIONS':
-        return '', 200
-        
-    try:
-        data = request.get_json()
-        message = data.get('message')
-        public_key = data.get('public_key')
-        
-        if not message or not public_key:
-            return jsonify({"error": "Message and public key required"}), 400
-        
-        # 🔐 СИМУЛЯЦИЯ ГИБРИДНОГО ШИФРОВАНИЯ
-        # В реальной системе здесь будет реализация RSA + AES
-        encrypted_data = {
-            'encrypted_data': f"HYBRID_ENCRYPTED:{hashlib.sha256(message.encode()).hexdigest()[:16]}",
-            'encrypted_key': f"RSA_ENCRYPTED_AES_KEY:{secrets.token_hex(16)}",
-            'iv': secrets.token_hex(12),
-            'algorithm': 'RSA-AES-256-GCM',
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        print(f"🔐 Hybrid encryption completed for {len(message)} chars")
-        
-        return jsonify({
-            "status": "encrypted",
-            "encrypted_data": encrypted_data,
-            "security_level": "high"
-        })
-        
-    except Exception as e:
-        print(f"❌ Error in /encrypt_hybrid: {e}")
-        return jsonify({"error": "Encryption error"}), 500
-
-@app.route('/decrypt_hybrid', methods=['POST', 'OPTIONS'])
-def decrypt_hybrid():
-    """🔐 Эндпоинт для гибридного дешифрования (симуляция)"""
-    if request.method == 'OPTIONS':
-        return '', 200
-        
-    try:
-        data = request.get_json()
-        encrypted_data = data.get('encrypted_data')
-        private_key = data.get('private_key')  # В реальной системе никогда не отправляется на сервер!
-        
-        if not encrypted_data:
-            return jsonify({"error": "Encrypted data required"}), 400
-        
-        # 🔐 СИМУЛЯЦИЯ ГИБРИДНОГО ДЕШИФРОВАНИЯ
-        # В реальной системе дешифрование должно происходить на клиенте
-        print(f"🔐 Hybrid decryption requested for {encrypted_data.get('encrypted_data', '')[:50]}...")
-        
-        return jsonify({
-            "status": "decryption_simulated",
-            "message": "🔒 Decryption should be performed on client side for security",
-            "security_note": "Never send private keys to server!"
-        })
-        
-    except Exception as e:
-        print(f"❌ Error in /decrypt_hybrid: {e}")
-        return jsonify({"error": "Decryption error"}), 500
-
-# Отправка сообщений с поддержкой гибридного шифрования
+# Отправка сообщений (оставляем как было)
 @app.route('/send', methods=['POST', 'OPTIONS'])
 def send_message():
     if request.method == 'OPTIONS':
@@ -389,9 +268,6 @@ def send_message():
         encrypted_data = data.get('encrypted_data')
         encryption_metadata = data.get('encryption_metadata')
         is_encrypted_payload = data.get('is_encrypted', False)
-        
-        # 🔐 ГИБРИДНОЕ ШИФРОВАНИЕ: Определяем тип шифрования
-        is_hybrid_encrypted = encrypted_data and 'encrypted_key' in encrypted_data
         
         # Проверяем что username предоставлен
         if not username:
@@ -453,7 +329,6 @@ def send_message():
             'self_destruct': self_destruct,
             # 🔐 Новые поля для шифрования
             'is_encrypted': is_encrypted_payload,
-            'is_hybrid_encrypted': is_hybrid_encrypted,  # 🔐 Новое поле для гибридного шифрования
             'encrypted_data': encrypted_data,
             'encryption_metadata': encryption_metadata
         }
@@ -493,15 +368,14 @@ def send_message():
                     del room['reactions'][msg['id']]
             room['messages'] = room['messages'][-100:]
         
-        encryption_type = "Hybrid" if is_hybrid_encrypted else "Standard" if is_encrypted_payload else "None"
-        print(f"📨 Message in room {room_id}: {username}: {text[:50]}... (type: {message_type}, encryption: {encryption_type})")
+        print(f"📨 Message in room {room_id}: {username}: {text[:50]}... (type: {message_type}, reply_to: {reply_to})")
+        print(f"🔐 Encrypted: {is_encrypted_payload}")
         
         # Формируем ответ
         response_data = {
             "status": "sent", 
             "message_id": message['id'],
-            "is_encrypted": is_encrypted_payload,
-            "is_hybrid_encrypted": is_hybrid_encrypted  # 🔐 Информация о типе шифрования
+            "is_encrypted": is_encrypted_payload
         }
         
         # Добавляем ID медиафайлов в ответ если они есть
@@ -516,7 +390,7 @@ def send_message():
         print(f"❌ Error in /send: {e}")
         return jsonify({"error": "Server error"}), 500
 
-# Получение сообщений с информацией о гибридном шифровании
+# Получение сообщений (оставляем как было)
 @app.route('/receive', methods=['GET'])
 def receive_messages():
     try:
@@ -547,13 +421,8 @@ def receive_messages():
             for msg in new_messages:
                 # Для системных сообщений оставляем текст как есть
                 if msg['type'] != 'system' and msg.get('is_encrypted'):
-                    # 🔐 УЛУЧШАЕМ ОТОБРАЖЕНИЕ ДЛЯ ГИБРИДНОГО ШИФРОВАНИЯ
-                    if msg.get('is_hybrid_encrypted'):
-                        msg['text'] = '🔐 Hybrid Encrypted Message'
-                        msg['encryption_type'] = 'hybrid'
-                    else:
-                        msg['text'] = '🔒 Encrypted Message'
-                        msg['encryption_type'] = 'standard'
+                    # Не показываем исходный текст, только зашифрованные данные
+                    msg['text'] = '🔒 Encrypted message'
                 # 🔐 ИСПРАВЛЕНИЕ: Для зашифрованных комнат ВСЕГДА добавляем медиаданные
                 if 'image_id' in msg and msg['image_id'] in room['media']:
                     msg['image_data'] = room['media'][msg['image_id']]
@@ -580,7 +449,6 @@ def receive_messages():
             "room_name": room['name'],
             "reactions": room['reactions'],
             "is_encrypted": room['is_encrypted'],
-            "supports_hybrid_encryption": True,  # 🔐 Новая информация
             "public_key": room.get('public_key')
         })
         
@@ -588,7 +456,213 @@ def receive_messages():
         print(f"❌ Error in /receive: {e}")
         return jsonify({"error": "Server error"}), 500
 
-# 🔐 ВОССТАНАВЛИВАЕМ ВСЕ ФИЧИ РЕАКЦИЙ
+# 🔐 Новый endpoint для проверки ключа
+@app.route('/verify_key', methods=['POST', 'OPTIONS'])
+def verify_key():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
+    try:
+        data = request.get_json()
+        room_id = data.get('room_id')
+        username = data.get('username')
+        public_key = data.get('public_key')
+        challenge_response = data.get('challenge_response')
+        
+        if not all([room_id, username, public_key]):
+            return jsonify({"error": "Room ID, username and public key required"}), 400
+            
+        if room_id not in rooms:
+            return jsonify({"error": "Room not found"}), 404
+            
+        room = rooms[room_id]
+        
+        if not room['is_encrypted']:
+            return jsonify({"error": "Room is not encrypted"}), 400
+        
+        # Проверяем количество попыток
+        attempt_key = f"{room_id}:{username}"
+        current_attempts = key_verification_attempts.get(attempt_key, 0)
+        if current_attempts >= 5:
+            return jsonify({
+                "error": "Too many verification attempts. Please wait 10 minutes.",
+                "blocked": True
+            }), 429
+        
+        # 🔐 Проверяем ключ
+        is_valid = verify_encryption_key(room_id, public_key, challenge_response)
+        
+        if is_valid:
+            key_verification_attempts.pop(attempt_key, None)
+            return jsonify({
+                "status": "key_verified",
+                "room_id": room_id,
+                "room_name": room['name'],
+                "is_encrypted": True,
+                "public_key": room.get('public_key')
+            })
+        else:
+            key_verification_attempts[attempt_key] = current_attempts + 1
+            return jsonify({
+                "error": "Key verification failed",
+                "attempts_remaining": 5 - (current_attempts + 1)
+            }), 401
+        
+    except Exception as e:
+        print(f"❌ Error in /verify_key: {e}")
+        return jsonify({"error": "Server error"}), 500
+
+# 🔐 Новый endpoint для получения информации о шифровании комнаты
+@app.route('/room_encryption_info', methods=['GET'])
+def room_encryption_info():
+    try:
+        room_id = request.args.get('room_id')
+        
+        if not room_id:
+            return jsonify({"error": "Room ID is required"}), 400
+            
+        if room_id not in rooms:
+            return jsonify({"error": "Room not found"}), 404
+            
+        room = rooms[room_id]
+        
+        return jsonify({
+            "room_id": room_id,
+            "room_name": room['name'],
+            "is_encrypted": room['is_encrypted'],
+            "has_public_key": bool(room.get('public_key')),
+            "users_count": len(room['users']),
+            "created_at": room['created_at'],
+            "encryption_enabled_at": room.get('encryption_enabled_at'),
+            "security_level": "high" if room['is_encrypted'] else "standard"
+        })
+        
+    except Exception as e:
+        print(f"❌ Error in /room_encryption_info: {e}")
+        return jsonify({"error": "Server error"}), 500
+
+# 🔐 Модифицированная информация о комнате
+@app.route('/room_info', methods=['GET'])
+def room_info():
+    try:
+        username = request.args.get('username')
+        
+        if not username or username not in user_rooms:
+            return jsonify({"error": "User not in any room"}), 400
+        
+        room_id = user_rooms[username]
+        room = rooms[room_id]
+        
+        return jsonify({
+            "room_id": room_id,
+            "room_name": room['name'],
+            "users_count": len(room['users']),
+            "created_at": room['created_at'],
+            "messages_count": len(room['messages']),
+            "is_encrypted": room['is_encrypted'],
+            "security_level": "🔒 Encrypted" if room['is_encrypted'] else "🔓 Standard",
+            "security_description": "End-to-end encrypted" if room['is_encrypted'] else "Standard security"
+        })
+        
+    except Exception as e:
+        print(f"❌ Error in /room_info: {e}")
+        return jsonify({"error": "Server error"}), 500
+
+# 🔐 Модифицированная статистика сервера
+@app.route('/stats')
+def get_stats():
+    """Получение статистики сервера"""
+    try:
+        total_rooms = len(rooms)
+        encrypted_rooms_count = len([r for r in rooms.values() if r['is_encrypted']])
+        total_users = len(user_rooms)
+        total_messages = sum(len(room['messages']) for room in rooms.values())
+        total_reactions = sum(len(reactions) for room in rooms.values() for reactions in room['reactions'].values())
+        
+        # Активные комнаты (с пользователями)
+        active_rooms = {room_id: room for room_id, room in rooms.items() if len(room['users']) > 0}
+        active_encrypted_rooms = len([r for r in active_rooms.values() if r['is_encrypted']])
+        
+        # 🔐 Статистика по шифрованию
+        encrypted_messages = sum(
+            len([m for m in room['messages'] if m.get('is_encrypted')]) 
+            for room in rooms.values() 
+            if room['is_encrypted']
+        )
+        
+        return jsonify({
+            "total_rooms": total_rooms,
+            "encrypted_rooms": encrypted_rooms_count,
+            "standard_rooms": total_rooms - encrypted_rooms_count,
+            "active_rooms": len(active_rooms),
+            "active_encrypted_rooms": active_encrypted_rooms,
+            "total_users": total_users,
+            "total_messages": total_messages,
+            "encrypted_messages": encrypted_messages,
+            "total_reactions": total_reactions,
+            "pending_call_signals": sum(len(signals) for signals in call_signals.values()),
+            "server_time": datetime.now().isoformat(),
+            "security_summary": {
+                "encrypted_percentage": round((encrypted_rooms_count / total_rooms * 100) if total_rooms > 0 else 0, 1),
+                "encrypted_messages_percentage": round((encrypted_messages / total_messages * 100) if total_messages > 0 else 0, 1),
+                "recommendation": "🔒 Enable encryption for sensitive conversations"
+            }
+        })
+        
+    except Exception as e:
+        print(f"❌ Error in /stats: {e}")
+        return jsonify({"error": "Server error"}), 500
+
+# 🔐 Очистка старых комнат
+@app.route('/cleanup', methods=['POST'])
+def cleanup_rooms():
+    """Очистка комнат старше 24 часов"""
+    try:
+        current_time = datetime.now()
+        rooms_to_delete = []
+        
+        # Находим комнаты старше 24 часов
+        for room_id, room in rooms.items():
+            created_at = datetime.fromisoformat(room['created_at'])
+            if (current_time - created_at).total_seconds() > 24 * 60 * 60:
+                rooms_to_delete.append(room_id)
+        
+        # Удаляем старые комнаты
+        for room_id in rooms_to_delete:
+            # Удаляем пользователей этой комнаты
+            users_to_remove = [user for user, rid in user_rooms.items() if rid == room_id]
+            for user in users_to_remove:
+                del user_rooms[user]
+                # Также удаляем сигналы звонков для этих пользователей
+                if user in call_signals:
+                    del call_signals[user]
+                # 🔐 Удаляем попытки верификации ключей
+                for key in list(key_verification_attempts.keys()):
+                    if key.startswith(f"{room_id}:"):
+                        del key_verification_attempts[key]
+            
+            # 🔐 Удаляем ключи шифрования если комната была зашифрованной
+            if room_id in room_keys:
+                del room_keys[room_id]
+            if room_id in encrypted_rooms:
+                encrypted_rooms.remove(room_id)
+                
+            del rooms[room_id]
+            print(f"🧹 Deleted old room: {room_id}")
+        
+        return jsonify({
+            "status": "cleaned",
+            "deleted_rooms": len(rooms_to_delete),
+            "active_rooms": len(rooms),
+            "remaining_encrypted_rooms": len(encrypted_rooms),
+            "cleaned_verification_attempts": len(rooms_to_delete)
+        })
+        
+    except Exception as e:
+        print(f"❌ Error in /cleanup: {e}")
+        return jsonify({"error": "Server error"}), 500
+
+# 🔐 Эндпоинты для реакций
 @app.route('/add_reaction', methods=['POST', 'OPTIONS'])
 def add_reaction():
     if request.method == 'OPTIONS':
@@ -733,7 +807,24 @@ def get_reactions():
         print(f"❌ Error in /get_reactions: {e}")
         return jsonify({"error": "Server error"}), 500
 
-# 🔐 ВОССТАНАВЛИВАЕМ ВСЕ ФИЧИ ЗВОНКОВ
+# Существующие endpoint'ы для медиа и звонков
+@app.route('/media/<media_id>', methods=['GET'])
+def get_media(media_id):
+    try:
+        # Ищем медиа во всех комнатах
+        for room in rooms.values():
+            if media_id in room['media']:
+                return jsonify({
+                    "media_id": media_id,
+                    "data": room['media'][media_id]
+                })
+        
+        return jsonify({"error": "Media not found"}), 404
+        
+    except Exception as e:
+        print(f"❌ Error in /media: {e}")
+        return jsonify({"error": "Server error"}), 500
+
 @app.route('/call_signal', methods=['POST', 'OPTIONS'])
 def call_signal():
     if request.method == 'OPTIONS':
@@ -786,25 +877,6 @@ def get_call_signals():
         print(f"❌ Error in /get_call_signals: {e}")
         return jsonify({"error": "Server error"}), 500
 
-# 🔐 ВОССТАНАВЛИВАЕМ МЕДИА ЭНДПОИНТ
-@app.route('/media/<media_id>', methods=['GET'])
-def get_media(media_id):
-    try:
-        # Ищем медиа во всех комнатах
-        for room in rooms.values():
-            if media_id in room['media']:
-                return jsonify({
-                    "media_id": media_id,
-                    "data": room['media'][media_id]
-                })
-        
-        return jsonify({"error": "Media not found"}), 404
-        
-    except Exception as e:
-        print(f"❌ Error in /media: {e}")
-        return jsonify({"error": "Server error"}), 500
-
-# 🔐 ВОССТАНАВЛИВАЕМ LEAVE_ROOM
 @app.route('/leave_room', methods=['POST', 'OPTIONS'])
 def leave_room():
     if request.method == 'OPTIONS':
@@ -842,307 +914,18 @@ def leave_room():
         room['messages'].append(system_message)
         room['next_id'] += 1
         
-        # 🔐 Удаляем попытки верификации ключей для этого пользователя
-        for key in list(key_verification_attempts.keys()):
-            if key.startswith(f"{room_id}:{username}"):
-                del key_verification_attempts[key]
-        
         print(f"👋 User {username} left room {room_id}")
         
-        return jsonify({
-            "status": "left",
-            "room_id": room_id,
-            "remaining_users": len(room['users'])
-        })
+        return jsonify({"status": "left"})
         
     except Exception as e:
         print(f"❌ Error in /leave_room: {e}")
         return jsonify({"error": "Server error"}), 500
 
-# 🔐 ВОССТАНАВЛИВАЕМ СТАТИСТИКУ И ОЧИСТКУ
-@app.route('/stats')
-def get_stats():
-    """Получение статистики сервера"""
-    try:
-        total_rooms = len(rooms)
-        encrypted_rooms_count = len([r for r in rooms.values() if r['is_encrypted']])
-        total_users = len(user_rooms)
-        total_messages = sum(len(room['messages']) for room in rooms.values())
-        total_reactions = sum(len(reactions) for room in rooms.values() for reactions in room['reactions'].values())
-        
-        # 🔐 Статистика по шифрованию
-        encrypted_messages = sum(
-            len([m for m in room['messages'] if m.get('is_encrypted')]) 
-            for room in rooms.values() 
-            if room['is_encrypted']
-        )
-        
-        # 🔐 Новая статистика по гибридному шифрованию
-        hybrid_encrypted_messages = sum(
-            len([m for m in room['messages'] if m.get('is_hybrid_encrypted')]) 
-            for room in rooms.values() 
-            if room['is_encrypted']
-        )
-        
-        # Активные комнаты (с пользователями)
-        active_rooms = {room_id: room for room_id, room in rooms.items() if len(room['users']) > 0}
-        active_encrypted_rooms = len([r for r in active_rooms.values() if r['is_encrypted']])
-        
-        return jsonify({
-            "total_rooms": total_rooms,
-            "encrypted_rooms": encrypted_rooms_count,
-            "standard_rooms": total_rooms - encrypted_rooms_count,
-            "active_rooms": len(active_rooms),
-            "active_encrypted_rooms": active_encrypted_rooms,
-            "total_users": total_users,
-            "total_messages": total_messages,
-            "encrypted_messages": encrypted_messages,
-            "hybrid_encrypted_messages": hybrid_encrypted_messages,  # 🔐 Новая статистика
-            "total_reactions": total_reactions,
-            "pending_call_signals": sum(len(signals) for signals in call_signals.values()),
-            "bruteforce_attempts_tracked": len(bruteforce_attempts),  # 🔐 Новая статистика
-            "server_time": datetime.now().isoformat(),
-            "security_summary": {
-                "encrypted_percentage": round((encrypted_rooms_count / total_rooms * 100) if total_rooms > 0 else 0, 1),
-                "encrypted_messages_percentage": round((encrypted_messages / total_messages * 100) if total_messages > 0 else 0, 1),
-                "hybrid_encryption_percentage": round((hybrid_encrypted_messages / encrypted_messages * 100) if encrypted_messages > 0 else 0, 1),
-                "recommendation": "🔒 Enable hybrid encryption for best performance and security"
-            }
-        })
-        
-    except Exception as e:
-        print(f"❌ Error in /stats: {e}")
-        return jsonify({"error": "Server error"}), 500
-
-@app.route('/cleanup', methods=['POST'])
-def cleanup_rooms():
-    """Очистка комнат старше 24 часов"""
-    try:
-        current_time = datetime.now()
-        rooms_to_delete = []
-        
-        # Находим комнаты старше 24 часов
-        for room_id, room in rooms.items():
-            created_at = datetime.fromisoformat(room['created_at'])
-            if (current_time - created_at).total_seconds() > 24 * 60 * 60:
-                rooms_to_delete.append(room_id)
-        
-        # Удаляем старые комнаты
-        for room_id in rooms_to_delete:
-            # Удаляем пользователей этой комнаты
-            users_to_remove = [user for user, rid in user_rooms.items() if rid == room_id]
-            for user in users_to_remove:
-                del user_rooms[user]
-                # Также удаляем сигналы звонков для этих пользователей
-                if user in call_signals:
-                    del call_signals[user]
-                # 🔐 Удаляем попытки верификации ключей
-                for key in list(key_verification_attempts.keys()):
-                    if key.startswith(f"{room_id}:"):
-                        del key_verification_attempts[key]
-            
-            # 🔐 Удаляем ключи шифрования если комната была зашифрованной
-            if room_id in room_keys:
-                del room_keys[room_id]
-            if room_id in encrypted_rooms:
-                encrypted_rooms.remove(room_id)
-                
-            del rooms[room_id]
-            print(f"🧹 Deleted old room: {room_id}")
-        
-        # 🔐 Очищаем старые записи брутфорса
-        cleanup_old_attempts()
-        
-        return jsonify({
-            "status": "cleaned",
-            "deleted_rooms": len(rooms_to_delete),
-            "active_rooms": len(rooms),
-            "remaining_encrypted_rooms": len(encrypted_rooms),
-            "cleaned_verification_attempts": len(rooms_to_delete),
-            "bruteforce_entries_remaining": len(bruteforce_attempts)
-        })
-        
-    except Exception as e:
-        print(f"❌ Error in /cleanup: {e}")
-        return jsonify({"error": "Server error"}), 500
-
-# 🔐 НОВЫЕ ЭНДПОИНТЫ БЕЗОПАСНОСТИ
-@app.route('/verify_key', methods=['POST', 'OPTIONS'])
-def verify_key():
-    if request.method == 'OPTIONS':
-        return '', 200
-        
-    try:
-        data = request.get_json()
-        room_id = data.get('room_id')
-        username = data.get('username')
-        public_key = data.get('public_key')
-        challenge_response = data.get('challenge_response')
-        
-        # 🔐 УЛУЧШЕННАЯ ЗАЩИТА ОТ БРУТФОРСА
-        client_ip = get_client_ip()
-        if not check_bruteforce(client_ip, room_id):
-            return jsonify({
-                "error": "Too many verification attempts. Please wait 1 hour.",
-                "blocked": True
-            }), 429
-        
-        if not all([room_id, username, public_key]):
-            return jsonify({"error": "Room ID, username and public key required"}), 400
-            
-        if room_id not in rooms:
-            return jsonify({"error": "Room not found"}), 404
-            
-        room = rooms[room_id]
-        
-        if not room['is_encrypted']:
-            return jsonify({"error": "Room is not encrypted"}), 400
-        
-        # Проверяем количество попыток
-        attempt_key = f"{room_id}:{username}"
-        current_attempts = key_verification_attempts.get(attempt_key, 0)
-        if current_attempts >= 5:
-            return jsonify({
-                "error": "Too many verification attempts. Please wait 10 minutes.",
-                "blocked": True
-            }), 429
-        
-        # 🔐 Проверяем ключ
-        is_valid = verify_encryption_key(room_id, public_key, challenge_response)
-        
-        if is_valid:
-            key_verification_attempts.pop(attempt_key, None)
-            return jsonify({
-                "status": "key_verified",
-                "room_id": room_id,
-                "room_name": room['name'],
-                "is_encrypted": True,
-                "supports_hybrid_encryption": True,  # 🔐 Новая информация
-                "public_key": room.get('public_key')
-            })
-        else:
-            key_verification_attempts[attempt_key] = current_attempts + 1
-            return jsonify({
-                "error": "Key verification failed",
-                "attempts_remaining": 5 - (current_attempts + 1)
-            }), 401
-        
-    except Exception as e:
-        print(f"❌ Error in /verify_key: {e}")
-        return jsonify({"error": "Server error"}), 500
-
-@app.route('/room_encryption_info', methods=['GET'])
-def room_encryption_info():
-    try:
-        room_id = request.args.get('room_id')
-        
-        if not room_id:
-            return jsonify({"error": "Room ID is required"}), 400
-            
-        if room_id not in rooms:
-            return jsonify({"error": "Room not found"}), 404
-            
-        room = rooms[room_id]
-        
-        return jsonify({
-            "room_id": room_id,
-            "room_name": room['name'],
-            "is_encrypted": room['is_encrypted'],
-            "has_public_key": bool(room.get('public_key')),
-            "supports_hybrid_encryption": True,  # 🔐 Новая информация
-            "users_count": len(room['users']),
-            "created_at": room['created_at'],
-            "encryption_enabled_at": room.get('encryption_enabled_at'),
-            "security_level": "high" if room['is_encrypted'] else "standard"
-        })
-        
-    except Exception as e:
-        print(f"❌ Error in /room_encryption_info: {e}")
-        return jsonify({"error": "Server error"}), 500
-
-@app.route('/room_info', methods=['GET'])
-def room_info():
-    try:
-        username = request.args.get('username')
-        
-        if not username or username not in user_rooms:
-            return jsonify({"error": "User not in any room"}), 400
-        
-        room_id = user_rooms[username]
-        room = rooms[room_id]
-        
-        return jsonify({
-            "room_id": room_id,
-            "room_name": room['name'],
-            "users_count": len(room['users']),
-            "created_at": room['created_at'],
-            "messages_count": len(room['messages']),
-            "is_encrypted": room['is_encrypted'],
-            "supports_hybrid_encryption": True,  # 🔐 Новая информация
-            "security_level": "🔒 Encrypted" if room['is_encrypted'] else "🔓 Standard",
-            "security_description": "End-to-end encrypted with hybrid RSA+AES" if room['is_encrypted'] else "Standard security"
-        })
-        
-    except Exception as e:
-        print(f"❌ Error in /room_info: {e}")
-        return jsonify({"error": "Server error"}), 500
-
-@app.route('/security_status', methods=['GET'])
-def security_status():
-    """Получение информации о статусе безопасности"""
-    try:
-        client_ip = get_client_ip()
-        
-        # 🔐 Собираем информацию о брутфорс-защите
-        bruteforce_info = {}
-        for key, attempts in bruteforce_attempts.items():
-            if client_ip in key:
-                bruteforce_info[key] = {
-                    'attempts_count': len(attempts),
-                    'last_attempt': max(attempts) if attempts else None,
-                    'blocked': len(attempts) >= MAX_ATTEMPTS_PER_HOUR
-                }
-        
-        return jsonify({
-            "client_ip": client_ip,
-            "bruteforce_protection": {
-                "max_attempts_per_hour": MAX_ATTEMPTS_PER_HOUR,
-                "block_time_seconds": BLOCK_TIME,
-                "current_attempts": bruteforce_info,
-                "global_attempts_tracked": len(bruteforce_attempts)
-            },
-            "encryption_support": {
-                "hybrid_encryption": True,
-                "algorithms": ["RSA-OAEP", "AES-GCM-256"],
-                "key_exchange": "RSA + AES hybrid",
-                "performance": "optimized"
-            },
-            "password_security": {
-                "hashing_algorithm": "PBKDF2-HMAC-SHA256",
-                "iterations": 100000,
-                "salt_length": 32,
-                "storage": "in_memory_only"
-            },
-            "recommendations": [
-                "Use hybrid encryption for best performance",
-                "Enable room passwords for additional security",
-                "Regularly rotate encryption keys"
-            ]
-        })
-        
-    except Exception as e:
-        print(f"❌ Error in /security_status: {e}")
-        return jsonify({"error": "Server error"}), 500
-
 # Запуск сервера
 if __name__ == '__main__':
     print("🚀 Starting Secure Chat Server...")
-    print("🔐 Security Features:")
-    print("   • Hybrid RSA+AES encryption support")
-    print("   • PBKDF2 password hashing (in-memory)")
-    print("   • Enhanced brute-force protection")
-    print("   • Key verification with rate limiting")
-    print("   • Automatic security cleanup")
+    print("🔐 Added bruteforce protection (10 attempts per 5 minutes)")
     print("📡 Endpoints available:")
     print("   POST /create_room - Create a new chat room")
     print("   POST /join_room - Join an existing room") 
@@ -1156,16 +939,6 @@ if __name__ == '__main__':
     print("   POST /leave_room - Leave current room")
     print("   GET  /stats - Get server statistics")
     print("   POST /cleanup - Cleanup old rooms")
-    print("🔐 NEW Encryption endpoints:")
-    print("   POST /encrypt_hybrid - Hybrid encryption (RSA+AES)")
-    print("   POST /decrypt_hybrid - Hybrid decryption")
-    print("   POST /verify_key - Verify encryption key")
-    print("   GET  /room_encryption_info - Get room encryption info")
-    print("   GET  /security_status - Get security status")
+    print("🔐 Encryption features enabled")
     
-    app.run(
-        host='0.0.0.0', 
-        port=5000, 
-        debug=False,
-
-    )
+    app.run(host='0.0.0.0', port=5000, debug=True)
