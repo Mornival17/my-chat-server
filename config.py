@@ -1,3 +1,4 @@
+# config.py
 class Config:
     # Защита от брутфорса
     MAX_ATTEMPTS_PER_IP = 10
@@ -20,3 +21,12 @@ class Config:
     # Безопасность паролей
     PASSWORD_HASH_ITERATIONS = 100000
     PASSWORD_SALT_LENGTH = 32
+    
+    # Гибридное шифрование
+    SESSION_KEY_LENGTH = 32  # 256-bit
+    AES_IV_LENGTH = 12       # 96-bit для GCM
+    AES_TAG_LENGTH = 16      # 128-bit tag
+    
+    # Защита от timing attacks
+    MIN_PASSWORD_LENGTH = 6
+    MAX_PASSWORD_LENGTH = 128

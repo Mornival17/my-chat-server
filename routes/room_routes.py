@@ -151,6 +151,9 @@ def join_room():
             key_verification_attempts.pop(attempt_key, None)
             print(f"🔐 Key verified for user {username} in room {room_id}")
         
+        # 🔐 СООБЩАЕМ СИСТЕМЕ ЗАЩИТЫ ОБ УСПЕШНОЙ АУТЕНТИФИКАЦИИ
+        advanced_bruteforce_protection.report_successful_auth(client_ip, room_id, username)
+        
         # Добавляем пользователя в комнату
         room['users'].add(username)
         user_rooms[username] = room_id
