@@ -7,9 +7,9 @@ def create_app():
     app = Flask(__name__)
     CORS(app)
     
-    # Инициализация компонентов
-    from security.bruteforce_protection import bruteforce_attempts
-    from models.data_store import rooms, user_rooms, call_signals, room_keys, encrypted_rooms, key_verification_attempts
+    # Инициализация компонентов (этот код не нужен, так как модули уже импортируют data_store)
+    # from security.bruteforce_protection import bruteforce_attempts
+    # from models.data_store import rooms, user_rooms, call_signals, room_keys, encrypted_rooms, key_verification_attempts
     
     # Регистрация маршрутов
     register_routes(app)

@@ -1,14 +1,5 @@
-from .room_routes import room_bp
-from .message_routes import message_bp
-from .security_routes import security_bp
-from .media_routes import media_bp
-from .call_routes import call_bp
-from .reaction_routes import reaction_bp
+# utils/__init__.py
+# Этот файл может быть пустым или содержать только экспорт вспомогательных функций
+from .helpers import generate_room_id, get_current_time, generate_media_id
 
-def register_routes(app):
-    app.register_blueprint(room_bp)
-    app.register_blueprint(message_bp)
-    app.register_blueprint(security_bp)
-    app.register_blueprint(media_bp)
-    app.register_blueprint(call_bp)
-    app.register_blueprint(reaction_bp)
+__all__ = ['generate_room_id', 'get_current_time', 'generate_media_id']
